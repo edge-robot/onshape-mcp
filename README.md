@@ -9,7 +9,9 @@ This working fork is checked out at
 `claw-onshape/external-token`, based on upstream commit
 [`f78ddc48a445765f32fcf052d9d8e6d709497d56`](https://github.com/altendky/onshape-mcp/tree/f78ddc48a445765f32fcf052d9d8e6d709497d56)
 (workspace version `0.5.3-dev.0`; MIT OR Apache-2.0). The `origin` remote still
-points to upstream; this is a local fork, not a published GitHub fork.
+points to upstream. The published fork is
+[`edge-robot/onshape-mcp`](https://github.com/edge-robot/onshape-mcp/tree/claw-onshape/external-token),
+available through the `edge-robot` remote.
 
 Changes from that revision:
 
