@@ -25,7 +25,7 @@ impl api::RequestExecutor for Executor<'_> {
             ApiState::OAuthPending(_) => {
                 return Ok(api::RequestOutcome::ToolResult(super::oauth_pending_error()));
             }
-            ApiState::Basic(_) | ApiState::OAuth(_) | ApiState::HttpOAuth(_) => {}
+            ApiState::ExternalToken(_, _) | ApiState::Basic(_) | ApiState::OAuth(_) | ApiState::HttpOAuth(_) => {}
         }
         let request = into_onshape_request(request);
         let response = super::execute_raw_api_request(self.state, &request).await?;

@@ -156,6 +156,9 @@ pub struct AllowedUser {
 /// Top-level application configuration.
 #[derive(Default, Deserialize)]
 pub struct AppConfig {
+    /// Externally owned credentials. This mode never logs in or refreshes.
+    #[serde(default)]
+    pub external_token: Option<ExternalTokenConfig>,
     /// Authentication settings.
     #[serde(default)]
     pub auth: AuthConfig,
@@ -165,6 +168,16 @@ pub struct AppConfig {
     /// HTTP transport settings (for `onshape-mcp http` subcommand).
     #[serde(default)]
     pub http: HttpTransportConfig,
+}
+
+/// Read-only external-token MVP; target binding is mandatory.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalTokenConfig {
+    pub file: std::path::PathBuf,
+    pub document_id: String,
+    pub workspace_id: String,
+    pub element_id: String,
 }
 
 // ============================================================================

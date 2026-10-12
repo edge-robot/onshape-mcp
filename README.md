@@ -2,6 +2,69 @@
 
 AI-assisted access to your Onshape CAD documents.
 
+## Claw-Onshape local fork — changes (2026-10-12)
+
+This working fork is checked out at
+`/home/kaos/Projects/01_pib/02_sw/onshape-mcp`, on branch
+`claw-onshape/external-token`, based on upstream commit
+[`f78ddc48a445765f32fcf052d9d8e6d709497d56`](https://github.com/altendky/onshape-mcp/tree/f78ddc48a445765f32fcf052d9d8e6d709497d56)
+(workspace version `0.5.3-dev.0`; MIT OR Apache-2.0). The `origin` remote still
+points to upstream; this is a local fork, not a published GitHub fork.
+
+Changes from that revision:
+
+- **External access-token mode:** optional `[external_token]` configuration accepts
+  an absolute `file` path and exact `document_id`, `workspace_id`, `element_id`.
+  Claw-Onshape owns OAuth and refresh. MCP never initiates OAuth, refreshes,
+  persists tokens, merges legacy credentials, or starts a token watcher in this mode.
+  `auth login` also refuses this mode. Existing upstream authentication modes retain
+  their original behavior when this configuration is absent.
+- **Protected credential reload:** every API dispatch reloads strict JSON containing
+  only `accessToken`, `expiresAt` (epoch milliseconds) and `scopes`. Missing,
+  malformed, expired (including a 30-second margin), oversized, insecurely owned,
+  permissive, hard-linked or symlinked files fail closed. Atomic replacement is
+  supported without a service restart. Refresh tokens are rejected by the schema.
+  Errors use fixed diagnostic codes rather than token contents.
+- **Exact-target read-only execution:** permits only selected document/workspace/
+  Part Studio metadata and feature GETs, plus bound immutable microversion reads.
+  All writes, other mutable targets, arbitrary headers, query parameters and
+  request bodies are denied. Provider origin is fixed to
+  `https://cad.onshape.com/api/v10`; there is no automatic refresh or replay.
+- **Restricted tools:** external mode lists and invokes only `onshape_api_search`,
+  `onshape_api_explain`, `onshape_api_schema`, `onshape_api_call` and
+  `onshape_auth_status`. Generic API call remains read-only at the executor.
+  Local file reads/writes are disabled in this mode.
+- **Private Streamable HTTP:** reuses upstream rmcp's HTTP transport and existing
+  shared handler, without an OAuth issuer or custom proxy. Adds `/health` for
+  liveness and `/health/ready` for credential availability. Deploy only on the
+  Clawake private container network with no published port; network membership
+  is the transport authorization boundary.
+- **Tests:** adds credential missing/expiry/rotation/refresh-isolation, insecure
+  permissions/symlink, exact target and write-denial tests. The patched upstream
+  workspace passed **697 tests, zero failures**, using Rust `1.99.0` and `Cargo.lock`.
+- **README:** records these changes and their acceptance limits; upstream usage
+  instructions below describe the original modes.
+
+Code changes are limited to
+`crates/onshape-mcp-core/src/config.rs`,
+`crates/onshape-mcp-io/src/{config.rs,external_token.rs,lib.rs,request.rs}`,
+and `crates/onshape-mcp/src/main.rs`.
+The reproducible code-only patch is maintained at
+[`../clawonshape/deploy/onshape-mcp/patches/0001-external-token-readonly.patch`](../clawonshape/deploy/onshape-mcp/patches/0001-external-token-readonly.patch).
+Clawake lifecycle and Claw-Onshape credential publication remain in their own
+repositories. No build cache, live configuration or credentials are copied here.
+
+**Acceptance limits:** native OpenClaw operator discovery passes; production raw
+MCP tools remain disabled. Native full-schema acquisition and owner-bound plugin
+invocation are unresolved. This fork does **not** implement Candidate-only writes,
+mutation receipts or live revision enforcement. No Camera Mount Plate write was
+performed. The catalog advertises API v16 while execution uses v10; write contract
+compatibility must be accepted before any future mutation. The external-token
+credential adapter is a potential upstream contribution; the exact-target policy
+and deployment assumptions are specific to Claw-Onshape.
+See the [integration report](../clawonshape/docs/self-hosted-mcp-integration-2026-10-12.md)
+for the complete gates and deployment evidence.
+
 ## What This Is
 
 Onshape MCP connects your AI assistant to Onshape. You describe what you want

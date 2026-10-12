@@ -219,6 +219,11 @@ async fn handle_auth_login(
     cli: &Cli,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use onshape_mcp_core::tools::LoginMode;
+    let config = onshape_mcp_io::config::load_config_with_overrides(
+        cli.config.as_deref(), build_cli_overrides(cli))?;
+    if config.external_token.is_some() {
+        return Err("external_token_auth_owned_externally".into());
+    }
 
     // Supplying a proxy URL explicitly selects self-hosted proxy mode.
     let mode = if let Some(proxy_url) = proxy_url {
