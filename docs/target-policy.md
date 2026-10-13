@@ -30,8 +30,12 @@ arbitrary Part Studio feature definitions, not a project-specific parameter or
 feature name. Other create/update/delete or FeatureScript endpoints remain denied
 until their atomic revision semantics are audited. An optional feature restriction
 narrows the authority; path feature ID must always equal `feature.featureId`.
-Header/query injection, multipart bodies, noncanonical paths and file references
-are refused. The raw `onshape_api_call` tool uses the same admission boundary.
+Only an absent header set or exactly one `Accept: application/json` header is
+permitted, matching the OpenAPI builder's automatic JSON response negotiation.
+Other headers, duplicate Accept values, query injection, multipart bodies,
+noncanonical paths and file references are refused. This pure admission rule
+applies to external-token reads and mutations; it does not alter targets or bodies.
+The raw `onshape_api_call` tool uses the same admission boundary.
 
 Immediately before provider dispatch the server checks method/route, target,
 operation, feature, ceiling, write scope and current external credential validity.

@@ -6,6 +6,7 @@ use oauth2::AccessToken;
 use onshape_client_core::request::ApiRequest;
 use onshape_client_io::{ClientAuthConfig, ClientConfig, OnshapeClient};
 use onshape_mcp_core::config::{AppConfig, ExternalTokenConfig, ResolvedAuth};
+use onshape_mcp_core::target_policy::permits_json_response_headers;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use std::{fs::OpenOptions, io::Read, time::Duration};
@@ -112,7 +113,7 @@ pub fn resolved_auth(config: &ExternalTokenConfig) -> ResolvedAuth {
 fn allowed(config: &ExternalTokenConfig, request: &ApiRequest) -> bool {
     if request.method != http::Method::GET
         || request.body.is_some()
-        || !request.headers.is_empty()
+        || !permits_json_response_headers(&request.headers)
         || !request.query_params.is_empty()
     {
         return false;
@@ -395,6 +396,45 @@ mod tests {
         );
         assert!(allowed(&c, &r));
         r.path.push_str("/../workspaces");
+        assert!(!allowed(&c, &r));
+    }
+
+    #[test]
+    fn catalog_built_feature_read_accepts_json_negotiation_only() {
+        let c = config("/nonexistent/token.json".into());
+        let spec = openapi_mcp_spec::OpenApiSpec::from_json_with_server_url_fallback(
+            crate::OPENAPI_SPEC_JSON,
+            crate::OPENAPI_SERVER_URL_FALLBACK,
+        )
+        .unwrap();
+        let r = spec
+            .build_request(
+                "getPartStudioFeatures",
+                &std::collections::HashMap::from([
+                    ("did".into(), c.document_id.clone()),
+                    ("wvm".into(), "w".into()),
+                    ("wvmid".into(), c.workspace_id.clone()),
+                    ("eid".into(), c.element_id.clone()),
+                ]),
+                &std::collections::HashMap::new(),
+                &http::HeaderMap::new(),
+                None,
+            )
+            .unwrap();
+        let mut r = crate::request::into_onshape_request(r);
+        assert_eq!(
+            r.headers.get(http::header::ACCEPT).unwrap(),
+            "application/json"
+        );
+        assert!(allowed(&c, &r));
+        r.headers.insert(
+            http::header::AUTHORIZATION,
+            http::HeaderValue::from_static("Bearer caller-controlled"),
+        );
+        assert!(!allowed(&c, &r));
+        r.headers.remove(http::header::AUTHORIZATION);
+        r.headers
+            .insert(http::header::ACCEPT, http::HeaderValue::from_static("*/*"));
         assert!(!allowed(&c, &r));
     }
 }

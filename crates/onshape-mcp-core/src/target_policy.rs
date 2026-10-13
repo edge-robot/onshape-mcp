@@ -5,6 +5,15 @@ use std::collections::BTreeSet;
 use onshape_client_core::request::{ApiRequest, RequestBody};
 use serde::Deserialize;
 
+/// Permit only the fixed JSON response negotiation used by the API builder.
+/// Other headers, alternate representations and duplicate values fail closed.
+pub fn permits_json_response_headers(headers: &http::HeaderMap) -> bool {
+    headers.is_empty()
+        || (headers.len() == 1
+            && headers.get(http::header::ACCEPT)
+                == Some(&http::HeaderValue::from_static("application/json")))
+}
+
 /// A validated provider ID (document, workspace, element, or microversion).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(try_from = "String")]
@@ -135,7 +144,7 @@ impl TargetConstraint {
                 .allowed_operations
                 .contains(&OperationId::UpdatePartStudioFeature)
             || !request.query_params.is_empty()
-            || !request.headers.is_empty()
+            || !permits_json_response_headers(&request.headers)
         {
             return Err(PolicyError::Denied);
         }
@@ -255,6 +264,32 @@ mod tests {
             p.validate(&"f".repeat(24), &"b".repeat(24), &"c".repeat(24))
                 .is_err()
         );
+    }
+    #[test]
+    fn json_response_header_admitted_without_payload_changes() {
+        let p = policy();
+        let mut r = request();
+        r.headers.insert(
+            http::header::ACCEPT,
+            http::HeaderValue::from_static("application/json"),
+        );
+        let before = serde_json::to_value(&r).unwrap();
+        assert_eq!(p.authorize(&r), Ok(()));
+        assert_eq!(serde_json::to_value(&r).unwrap(), before);
+        for value in ["*/*", "text/plain", "application/json, text/plain"] {
+            r.headers
+                .insert(http::header::ACCEPT, http::HeaderValue::from_static(value));
+            assert_eq!(p.authorize(&r), Err(PolicyError::Denied));
+        }
+        r.headers.insert(
+            http::header::ACCEPT,
+            http::HeaderValue::from_static("application/json"),
+        );
+        r.headers.append(
+            http::header::ACCEPT,
+            http::HeaderValue::from_static("application/json"),
+        );
+        assert_eq!(p.authorize(&r), Err(PolicyError::Denied));
     }
     #[test]
     fn wrong_targets_operations_and_escape_rejected() {
