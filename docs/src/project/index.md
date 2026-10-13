@@ -9,6 +9,8 @@ or public OAuth proxy.
 
 ### Core Design
 
+- [Project Overview](overview.md) — Rust, Node wrapper and Sans-IO request flow
+
 - [Principles](principles.md) — Sans-IO philosophy, testability goals, dependencies policy
 - [Architecture](architecture.md) — Layer design, crate structure, workspace layout
 - [Common Onshape Client Extraction Plan](common-onshape-client-plan.md) — Incremental plan for neutral common client crates
