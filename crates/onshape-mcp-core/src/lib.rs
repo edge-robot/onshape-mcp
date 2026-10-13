@@ -4,6 +4,7 @@
 //! All I/O operations are handled by the `onshape-mcp-io` crate.
 
 pub mod config;
+pub mod target_policy;
 pub mod tools;
 
 /// Validate and normalize an explicitly configured OAuth proxy URL.

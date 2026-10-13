@@ -143,7 +143,9 @@ pub fn check_file_permissions(path: &Path) -> Result<(), ConfigLoadError> {
 /// A complete token-file pair atomically replaces either partial explicit field,
 /// avoiding credentials assembled from different sources.
 fn merge_credentials_from_token_file(config: &mut AppConfig) {
-    if config.external_token.is_some() { return; }
+    if config.external_token.is_some() {
+        return;
+    }
     if config.auth.client_id.is_some() && config.auth.client_secret.is_some() {
         return;
     }

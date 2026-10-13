@@ -79,7 +79,7 @@ pub(crate) const REFRESH_MARGIN_SECS: i64 = 60;
 /// `OAuth` — Bearer token auth with refresh capability.
 /// `OAuthPending` — client creds present but awaiting tokens from auth flow.
 pub(crate) enum ApiState {
-    ExternalToken(onshape_mcp_core::config::ExternalTokenConfig, Duration),
+    ExternalToken(Box<onshape_mcp_core::config::ExternalTokenConfig>, Duration),
     /// Credentials are not configured or are incomplete.
     NotConfigured {
         /// What auth method was attempted.
@@ -479,9 +479,16 @@ impl ServerHandler for OnshapeMcpServer {
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
         let mut catalog = tools::list_tools();
         if self.config.external_token.is_some() {
-            catalog.retain(|tool| matches!(tool.name.as_ref(),
-                "onshape_api_search" | "onshape_api_explain" | "onshape_api_schema" |
-                "onshape_api_call" | "onshape_auth_status"));
+            catalog.retain(|tool| {
+                matches!(
+                    tool.name.as_ref(),
+                    "onshape_api_search"
+                        | "onshape_api_explain"
+                        | "onshape_api_schema"
+                        | "onshape_api_call"
+                        | "onshape_auth_status"
+                )
+            });
         }
         std::future::ready(Ok(ListToolsResult::with_all_items(catalog)
             .with_ttl_ms(STATIC_MCP_CACHE_TTL_MS)
@@ -557,10 +564,20 @@ impl OnshapeMcpServer {
         &self,
         request: CallToolRequestParams,
     ) -> Result<CallToolResult, McpError> {
-        if self.config.external_token.is_some() && !matches!(request.name.as_ref(),
-            "onshape_api_search" | "onshape_api_explain" | "onshape_api_schema" |
-            "onshape_api_call" | "onshape_auth_status") {
-            return Err(McpError::invalid_request("external_token_tool_denied", None));
+        if self.config.external_token.is_some()
+            && !matches!(
+                request.name.as_ref(),
+                "onshape_api_search"
+                    | "onshape_api_explain"
+                    | "onshape_api_schema"
+                    | "onshape_api_call"
+                    | "onshape_auth_status"
+            )
+        {
+            return Err(McpError::invalid_request(
+                "external_token_tool_denied",
+                None,
+            ));
         }
         // Lock state to derive resolved auth and potentially execute API requests.
         let mut state = self.api_state.lock().await;
@@ -905,7 +922,9 @@ async fn execute_raw_api_request(
         ApiState::NotConfigured { .. } | ApiState::OAuthPending(_) => {
             unreachable!("caller must check state before calling execute_raw_api_request")
         }
-        ApiState::ExternalToken(config, timeout) => external_token::execute(config, *timeout, api_req).await,
+        ApiState::ExternalToken(config, timeout) => {
+            external_token::execute(config, *timeout, api_req).await
+        }
         ApiState::Basic(client) => execute_basic_raw(client, api_req).await,
         // OAuth needs &mut ApiState for the potential state transition,
         // so we handle it at the ApiState level.
@@ -1607,7 +1626,10 @@ fn build_api_state(
 ) -> Result<ApiState, Box<dyn std::error::Error + Send + Sync>> {
     if let Some(external) = &config.external_token {
         external_token::validate_config(external)?;
-        return Ok(ApiState::ExternalToken(external.clone(), config.api.timeout));
+        return Ok(ApiState::ExternalToken(
+            Box::new(external.clone()),
+            config.api.timeout,
+        ));
     }
     if let Some(proxy_url) = config.auth.proxy_url.as_deref() {
         onshape_mcp_core::validate_proxy_url(proxy_url)
@@ -1907,9 +1929,6 @@ pub async fn run_http(
     version: &str,
     config: AppConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if config.external_token.is_some() {
-        return external_token::run_http(name, version, config).await;
-    }
     use std::sync::Arc;
 
     use axum::{Router, middleware};
@@ -1917,6 +1936,10 @@ pub async fn run_http(
         StreamableHttpService, session::local::LocalSessionManager,
     };
     use tokio_util::sync::CancellationToken;
+
+    if config.external_token.is_some() {
+        return external_token::run_http(name, version, config).await;
+    }
 
     // Validate required config.
     let public_url = config

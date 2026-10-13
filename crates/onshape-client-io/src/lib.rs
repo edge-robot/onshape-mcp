@@ -150,15 +150,35 @@ impl OnshapeClient {
     /// Returns [`ClientError::RequestBuild`] if the `reqwest::Client` cannot be
     /// constructed (e.g., TLS backend initialization failure).
     pub fn new(config: ClientConfig) -> Result<Self, ClientError> {
+        Self::from_builder(config, Client::builder())
+    }
+
+    /// Construct a client for a single execution attempt. Redirects and
+    /// transport retries are disabled; ambiguous writes must be reconciled.
+    ///
+    /// # Errors
+    /// Returns an error if the HTTP client cannot be built.
+    pub fn new_single_attempt(config: ClientConfig) -> Result<Self, ClientError> {
+        Self::from_builder(
+            config,
+            Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never()),
+        )
+    }
+
+    fn from_builder(
+        config: ClientConfig,
+        builder: reqwest::ClientBuilder,
+    ) -> Result<Self, ClientError> {
         let timeout = config.timeout.unwrap_or(DEFAULT_TIMEOUT);
 
-        let http =
-            Client::builder()
-                .timeout(timeout)
-                .build()
-                .map_err(|e| ClientError::RequestBuild {
-                    message: format!("failed to build HTTP client: {e}"),
-                })?;
+        let http = builder
+            .timeout(timeout)
+            .build()
+            .map_err(|e| ClientError::RequestBuild {
+                message: format!("failed to build HTTP client: {e}"),
+            })?;
 
         // Strip trailing slash from base URL for consistent joining.
         let base_url = config.base_url.trim_end_matches('/').to_string();
@@ -353,6 +373,37 @@ mod tests {
             }
         }
         String::from_utf8_lossy(&buffer).to_lowercase()
+    }
+
+    #[tokio::test]
+    async fn single_attempt_does_not_follow_write_redirect() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("local address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("read timeout");
+            read_request_headers(&mut stream);
+            write!(stream, "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{address}/second\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").expect("redirect");
+            listener.set_nonblocking(true).expect("nonblocking");
+            thread::sleep(Duration::from_millis(100));
+            assert!(listener.accept().is_err(), "write must not be redirected");
+        });
+        let mut config = test_oauth_config();
+        config.base_url = format!("http://{address}");
+        let client = OnshapeClient::new_single_attempt(config).expect("client");
+        let request = ApiRequest {
+            method: http::Method::POST,
+            path: "/first".into(),
+            query_params: vec![],
+            headers: http::HeaderMap::new(),
+            body: None,
+            content_type: None,
+        };
+        let response = client.execute(&request).await.expect("response");
+        assert_eq!(response.status, http::StatusCode::TEMPORARY_REDIRECT);
+        server.join().expect("server");
     }
 
     #[test]

@@ -170,7 +170,7 @@ pub struct AppConfig {
     pub http: HttpTransportConfig,
 }
 
-/// Read-only external-token MVP; target binding is mandatory.
+/// External-token mode; target binding is mandatory and writes default to denied.
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalTokenConfig {
@@ -178,6 +178,9 @@ pub struct ExternalTokenConfig {
     pub document_id: String,
     pub workspace_id: String,
     pub element_id: String,
+    /// Optional, operator-provisioned bounded mutation authority.
+    #[serde(default)]
+    pub mutation: Option<crate::target_policy::TargetConstraint>,
 }
 
 // ============================================================================
