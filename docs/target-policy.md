@@ -68,6 +68,13 @@ Existing upstream authentication defaults remain unchanged.
 
 ## Reviewed payload admission and native v16 reads
 
+For the assigned full-feature read, call `getPartStudioFeatures` with target path
+parameters and omit query parameters. External-token read admission rejects query
+options, including optional options advertised by API explanation.
+`external_token_read_policy_denied` is local admission failure before provider I/O;
+repeating OAuth consent cannot resolve it. Correct the request shape or have the
+operator review the specifically required operation without bypassing the policy.
+
 External-token deployments can set `read_api_version = "v16"` to retrieve feature
 payloads with the serialization/library metadata required by native updates.
 The default remains v10. Mutation dispatch remains v16 and single-attempt.
