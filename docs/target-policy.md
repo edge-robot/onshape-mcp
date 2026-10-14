@@ -65,3 +65,24 @@ without its exact approval/attempt contract and native runtime acceptance.
 The explicit target scope is a seam for future verified subject, operation,
 approval and expiry claims. No VC/VP framework or agent-specific naming is added.
 Existing upstream authentication defaults remain unchanged.
+
+## Reviewed payload admission and native v16 reads
+
+External-token deployments can set `read_api_version = "v16"` to retrieve feature
+payloads with the serialization/library metadata required by native updates.
+The default remains v10. Mutation dispatch remains v16 and single-attempt.
+
+`mutation_approval_file` optionally points to an operator-issued private JSON file:
+`{version:1, proposalId, expiresAt, body}`. When configured, every update additionally
+requires the exact approved JSON body and an unexpired approval. Existing target,
+operation, feature, OAuth2Write and provider CAS admission still apply. The file
+is read-only in MCP; its owner issues approvals after reviewing a concrete payload.
+Missing, insecure, expired or different approvals are rejected before provider I/O.
+This is generic execution admission, not an engineering workflow or an OAuth owner.
+
+A future verified VC/VP can replace local-file issuer trust and supply subject,
+audience, target, operation, payload digest, source revision, approval and expiry
+claims to the existing typed policy. No DID resolver, credential issuer, proof
+format or revocation service is introduced in this increment. Provider CAS and
+single-attempt dispatch do not constitute a durable exactly-once execution ledger;
+uncertain writes require control-plane reconciliation rather than automatic retry.

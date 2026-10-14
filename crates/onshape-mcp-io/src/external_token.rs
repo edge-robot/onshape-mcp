@@ -3,7 +3,7 @@
 use super::{McpError, OnshapeMcpServer, RawResponse};
 use chrono::{DateTime, Utc};
 use oauth2::AccessToken;
-use onshape_client_core::request::ApiRequest;
+use onshape_client_core::request::{ApiRequest, RequestBody};
 use onshape_client_io::{ClientAuthConfig, ClientConfig, OnshapeClient};
 use onshape_mcp_core::config::{AppConfig, ExternalTokenConfig, ResolvedAuth};
 use onshape_mcp_core::target_policy::permits_json_response_headers;
@@ -26,7 +26,15 @@ fn id(value: &str) -> bool {
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 pub fn validate_config(config: &ExternalTokenConfig) -> Result<(), &'static str> {
-    if !config.file.is_absolute()
+    if config
+        .mutation_approval_file
+        .as_ref()
+        .is_some_and(|p| !p.is_absolute())
+        || config
+            .read_api_version
+            .as_deref()
+            .is_some_and(|v| !["v10", "v16"].contains(&v))
+        || !config.file.is_absolute()
         || !id(&config.document_id)
         || !id(&config.workspace_id)
         || !id(&config.element_id)
@@ -45,44 +53,54 @@ pub fn validate_config(config: &ExternalTokenConfig) -> Result<(), &'static str>
     Ok(())
 }
 
-fn load(config: &ExternalTokenConfig) -> Result<Credential, &'static str> {
+fn private_json(
+    file_path: &std::path::Path,
+    max_bytes: u64,
+) -> Result<serde_json::Value, &'static str> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-    validate_config(config)?;
-    let fail = |_| "external_token_unavailable";
-    if std::fs::canonicalize(&config.file).map_err(fail)? != config.file {
-        return Err("external_token_unavailable");
+    let fail = |_| "external_private_file_unavailable";
+    if std::fs::canonicalize(file_path).map_err(fail)? != file_path {
+        return Err("external_private_file_unavailable");
     }
-    let parent = config.file.parent().ok_or("external_token_unavailable")?;
+    let parent = file_path
+        .parent()
+        .ok_or("external_private_file_unavailable")?;
     let dir = std::fs::symlink_metadata(parent).map_err(fail)?;
     let owner = std::fs::metadata("/proc/self").map_err(fail)?.uid();
     if !dir.is_dir() || dir.uid() != owner || dir.mode() & 0o077 != 0 {
-        return Err("external_token_unavailable");
+        return Err("external_private_file_unavailable");
     }
-    // O_NOFOLLOW on Linux: validate the opened inode, then read that same inode.
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(0x20000)
-        .open(&config.file)
+        .open(file_path)
         .map_err(fail)?;
     let meta = file.metadata().map_err(fail)?;
     if !meta.is_file()
         || meta.nlink() != 1
         || meta.uid() != owner
         || meta.mode() & 0o077 != 0
-        || meta.len() > 16384
+        || meta.len() > max_bytes
     {
-        return Err("external_token_unavailable");
+        return Err("external_private_file_unavailable");
     }
     let mut bytes = Vec::new();
     file.by_ref()
-        .take(16385)
+        .take(max_bytes + 1)
         .read_to_end(&mut bytes)
         .map_err(fail)?;
-    if bytes.len() > 16384 {
-        return Err("external_token_unavailable");
+    if bytes.len() as u64 > max_bytes {
+        return Err("external_private_file_unavailable");
     }
-    let credential: Credential =
-        serde_json::from_slice(&bytes).map_err(|_| "external_token_unavailable")?;
+    serde_json::from_slice(&bytes).map_err(|_| "external_private_file_unavailable")
+}
+
+fn load(config: &ExternalTokenConfig) -> Result<Credential, &'static str> {
+    validate_config(config)?;
+    let credential: Credential = serde_json::from_value(
+        private_json(&config.file, 16384).map_err(|_| "external_token_unavailable")?,
+    )
+    .map_err(|_| "external_token_unavailable")?;
     let token = credential.access_token.expose_secret();
     if token.is_empty()
         || token.len() > 8192
@@ -146,6 +164,22 @@ fn allowed(config: &ExternalTokenConfig, request: &ApiRequest) -> bool {
             && parts[8] == "features")
 }
 
+fn approval_matches(value: &serde_json::Value, request: &ApiRequest, now: i64) -> bool {
+    let Some(RequestBody::Json(body)) = &request.body else {
+        return false;
+    };
+    value.get("version").and_then(serde_json::Value::as_u64) == Some(1)
+        && value
+            .get("expiresAt")
+            .and_then(serde_json::Value::as_i64)
+            .is_some_and(|t| t > now)
+        && value
+            .get("proposalId")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+        && value.get("body") == Some(body)
+}
+
 pub async fn execute(
     config: &ExternalTokenConfig,
     timeout: Duration,
@@ -167,6 +201,16 @@ pub async fn execute(
             None,
         ));
     }
+    if mutation && let Some(file) = &config.mutation_approval_file {
+        let approval = private_json(file, 1_048_576)
+            .map_err(|_| McpError::invalid_request("mutation_approval_unavailable", None))?;
+        if !approval_matches(&approval, request, Utc::now().timestamp_millis()) {
+            return Err(McpError::invalid_request(
+                "mutation_approval_mismatch",
+                None,
+            ));
+        }
+    }
     let c = load(config).map_err(|code| McpError::invalid_request(code, None))?;
     if mutation && !c.scopes.iter().any(|scope| scope == "OAuth2Write") {
         return Err(McpError::invalid_request(
@@ -176,7 +220,7 @@ pub async fn execute(
     }
     // Fixed provider origin. Each dispatch reloads the atomically rotated file.
     let client = OnshapeClient::new_single_attempt(ClientConfig {
-        base_url: if mutation {
+        base_url: if mutation || config.read_api_version.as_deref() == Some("v16") {
             "https://cad.onshape.com/api/v16"
         } else {
             "https://cad.onshape.com/api/v10"
@@ -303,6 +347,8 @@ mod tests {
             workspace_id: "b".repeat(24),
             element_id: "c".repeat(24),
             mutation: None,
+            mutation_approval_file: None,
+            read_api_version: None,
         }
     }
     fn publish(file: &std::path::Path, value: &serde_json::Value) {
@@ -436,5 +482,43 @@ mod tests {
         r.headers
             .insert(http::header::ACCEPT, http::HeaderValue::from_static("*/*"));
         assert!(!allowed(&c, &r));
+    }
+    #[test]
+    fn approval_requires_exact_body_and_current_expiry() {
+        let body = serde_json::json!({"feature":{"featureId":"plate","parameters":[{"parameterId":"holeDiameter","expression":"4.5 mm"}]},"sourceMicroversion":"e".repeat(24),"rejectMicroversionSkew":true});
+        let mut request = ApiRequest {
+            method: http::Method::POST,
+            path: "/unused".into(),
+            query_params: vec![],
+            headers: http::HeaderMap::new(),
+            body: Some(RequestBody::Json(body.clone())),
+            content_type: None,
+        };
+        let approval = serde_json::json!({"version":1,"proposalId":"reviewed-proposal","expiresAt":2000,"body":body});
+        assert!(approval_matches(&approval, &request, 1000));
+        assert!(!approval_matches(&approval, &request, 2000));
+        assert!(!approval_matches(&serde_json::Value::Null, &request, 1000));
+        request.body = Some(RequestBody::Json(
+            serde_json::json!({"feature":{"featureId":"plate"},"sourceMicroversion":"e".repeat(24),"rejectMicroversionSkew":true}),
+        ));
+        assert!(!approval_matches(&approval, &request, 1000));
+    }
+    #[test]
+    fn approval_file_permissions_and_read_version_are_validated() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let file = dir.path().join("approval.json");
+        publish(&file, &serde_json::json!({"version":1}));
+        assert!(private_json(&file, 1024).is_ok());
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(private_json(&file, 1024).is_err());
+        let mut c = config(dir.path().join("token.json"));
+        c.read_api_version = Some("v16".into());
+        assert!(validate_config(&c).is_ok());
+        c.read_api_version = Some("v17".into());
+        assert!(validate_config(&c).is_err());
+        c.read_api_version = None;
+        c.mutation_approval_file = Some("relative.json".into());
+        assert!(validate_config(&c).is_err());
     }
 }

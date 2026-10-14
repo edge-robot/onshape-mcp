@@ -181,6 +181,12 @@ pub struct ExternalTokenConfig {
     /// Optional, operator-provisioned bounded mutation authority.
     #[serde(default)]
     pub mutation: Option<crate::target_policy::TargetConstraint>,
+    /// Optional private operator approval; request body must match it exactly.
+    #[serde(default)]
+    pub mutation_approval_file: Option<std::path::PathBuf>,
+    /// Native feature reads may use v16 to prepare compatible update payloads.
+    #[serde(default)]
+    pub read_api_version: Option<String>,
 }
 
 // ============================================================================
