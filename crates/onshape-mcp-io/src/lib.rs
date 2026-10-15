@@ -3382,4 +3382,57 @@ mod tests {
             b"png-bytes"
         );
     }
+
+    // --- G12: onshape_auth_status validate=true in external-token mode ---
+
+    /// Pins the current behaviour for contract gap G12: `validate: true` builds
+    /// `GET /users/sessioninfo`, which is outside the external-token read set
+    /// (contract §2.4). It is denied with `external_token_read_policy_denied`
+    /// before the credential file is loaded and before any client is built, so
+    /// no provider I/O happens. The token file deliberately does not exist: if
+    /// the policy check ever moved after credential loading, this test would see
+    /// `external_token_unavailable` instead (still without network access).
+    #[tokio::test]
+    async fn external_token_auth_status_validate_is_read_policy_denied_before_io() {
+        let dir = tempfile::tempdir().expect("should create temp dir");
+        let config = onshape_mcp_core::config::ExternalTokenConfig {
+            file: dir.path().join("missing-token.json"),
+            document_id: "a".repeat(24),
+            workspace_id: "b".repeat(24),
+            element_id: "c".repeat(24),
+            mutation: None,
+            mutation_approval_file: None,
+            read_api_version: None,
+        };
+        let mut state = ApiState::ExternalToken(Box::new(config), Duration::from_secs(1));
+        let initial_validation = ValidationState::default();
+        let validation = tokio::sync::Mutex::new(initial_validation.clone());
+        let spec = embedded_openapi_spec();
+        let arguments = serde_json::json!({"validate": true});
+
+        let effect = tools::call_tool(
+            "onshape_auth_status",
+            arguments.as_object(),
+            &state.resolved_auth(),
+            &initial_validation,
+            Some(&spec),
+        );
+        match &effect {
+            tools::ToolEffect::ApiRequest { request, .. } => {
+                assert_eq!(request.method, http::Method::GET);
+                assert_eq!(request.path, "/users/sessioninfo");
+            }
+            other => panic!("expected sessioninfo ApiRequest, got {other:?}"),
+        }
+
+        let error = dispatch_tool_effect(effect, &mut state, &validation, None, false, false)
+            .await
+            .expect_err("validate=true must be denied in external-token mode");
+
+        assert_eq!(error.code, ErrorCode::INVALID_REQUEST);
+        assert_eq!(error.message, "external_token_read_policy_denied");
+        assert!(error.data.is_none());
+        assert_eq!(*validation.lock().await, initial_validation);
+        assert!(matches!(state, ApiState::ExternalToken(_, _)));
+    }
 }
