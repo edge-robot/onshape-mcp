@@ -6,7 +6,7 @@ issue: edge-robot/onshape-mcp#1
 architecture-ref: clawonshape/docs/interface/onshape-mcp.md#23-tools-external-token-mode
 contract-version: 0.2.0-draft
 foreign-repo-commit: 49dabc52ce36554f564fd17fd8f924557426a047
-status: draft
+status: issued
 ---
 # G1: single-source external-token tool allowlist and contract snapshot test
 
