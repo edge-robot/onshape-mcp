@@ -569,6 +569,36 @@ pub fn list_tools() -> Vec<Tool> {
     tools
 }
 
+// Contract-Ref: clawonshape/docs/interface/onshape-mcp.md#23-tools-external-token-mode
+/// Names of the tools exposed in external-token mode, in [`list_tools()`] order.
+///
+/// Every other tool is hidden from `tools/list` and rejected with
+/// `external_token_tool_denied` when the server runs in external-token mode.
+pub const EXTERNAL_TOKEN_TOOL_NAMES: [&str; 5] = [
+    "onshape_auth_status",
+    "onshape_api_search",
+    "onshape_api_explain",
+    "onshape_api_call",
+    "onshape_api_schema",
+];
+
+/// Returns whether `name` is a tool exposed in external-token mode.
+#[must_use]
+pub fn is_external_token_tool(name: &str) -> bool {
+    EXTERNAL_TOKEN_TOOL_NAMES.contains(&name)
+}
+
+/// Returns the tool catalog exposed in external-token mode.
+///
+/// This is [`list_tools()`] filtered by [`is_external_token_tool`], preserving
+/// the [`list_tools()`] order.
+#[must_use]
+pub fn list_tools_external_token() -> Vec<Tool> {
+    let mut tools = list_tools();
+    tools.retain(|tool| is_external_token_tool(tool.name.as_ref()));
+    tools
+}
+
 /// Dispatches a tool call by name.
 ///
 /// The `resolved_auth` parameter provides the current authentication state,
@@ -1635,6 +1665,52 @@ mod tests {
     fn list_tools_has_eleven_tools() {
         let tools = list_tools();
         assert_eq!(tools.len(), 11);
+    }
+
+    // --- external-token allowlist tests ---
+
+    #[test]
+    fn external_token_tool_names_are_the_contract_set() {
+        let mut names = EXTERNAL_TOKEN_TOOL_NAMES.to_vec();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "onshape_api_call",
+                "onshape_api_explain",
+                "onshape_api_schema",
+                "onshape_api_search",
+                "onshape_auth_status",
+            ]
+        );
+    }
+
+    #[test]
+    fn list_tools_external_token_preserves_list_tools_order() {
+        let expected: Vec<String> = list_tools()
+            .into_iter()
+            .filter(|tool| is_external_token_tool(tool.name.as_ref()))
+            .map(|tool| tool.name.into_owned())
+            .collect();
+        let actual: Vec<String> = list_tools_external_token()
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect();
+        assert_eq!(actual, expected);
+        assert_eq!(actual, EXTERNAL_TOKEN_TOOL_NAMES);
+    }
+
+    #[test]
+    fn external_token_catalog_excludes_login_and_screenshot() {
+        for name in ["onshape_auth_login", "onshape_screenshot"] {
+            assert!(!is_external_token_tool(name), "{name} must be denied");
+            assert!(
+                list_tools_external_token()
+                    .iter()
+                    .all(|tool| tool.name != name),
+                "{name} must not be listed"
+            );
+        }
     }
 
     #[test]

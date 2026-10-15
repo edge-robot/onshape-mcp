@@ -477,19 +477,11 @@ impl ServerHandler for OnshapeMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
-        let mut catalog = tools::list_tools();
-        if self.config.external_token.is_some() {
-            catalog.retain(|tool| {
-                matches!(
-                    tool.name.as_ref(),
-                    "onshape_api_search"
-                        | "onshape_api_explain"
-                        | "onshape_api_schema"
-                        | "onshape_api_call"
-                        | "onshape_auth_status"
-                )
-            });
-        }
+        let catalog = if self.config.external_token.is_some() {
+            tools::list_tools_external_token()
+        } else {
+            tools::list_tools()
+        };
         std::future::ready(Ok(ListToolsResult::with_all_items(catalog)
             .with_ttl_ms(STATIC_MCP_CACHE_TTL_MS)
             .with_cache_scope(CacheScope::Public)))
@@ -564,16 +556,7 @@ impl OnshapeMcpServer {
         &self,
         request: CallToolRequestParams,
     ) -> Result<CallToolResult, McpError> {
-        if self.config.external_token.is_some()
-            && !matches!(
-                request.name.as_ref(),
-                "onshape_api_search"
-                    | "onshape_api_explain"
-                    | "onshape_api_schema"
-                    | "onshape_api_call"
-                    | "onshape_auth_status"
-            )
-        {
+        if self.config.external_token.is_some() && !tools::is_external_token_tool(&request.name) {
             return Err(McpError::invalid_request(
                 "external_token_tool_denied",
                 None,
