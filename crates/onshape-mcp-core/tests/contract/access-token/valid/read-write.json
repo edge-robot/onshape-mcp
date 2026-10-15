@@ -1,0 +1,8 @@
+{
+  "accessToken": "access-fixture-not-a-real-token",
+  "expiresAt": 4102444800000,
+  "scopes": [
+    "OAuth2Read",
+    "OAuth2Write"
+  ]
+}

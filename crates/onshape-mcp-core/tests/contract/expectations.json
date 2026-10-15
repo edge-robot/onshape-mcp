@@ -1,0 +1,30 @@
+{
+  "contractVersion": "0.2.0-draft",
+  "target": {
+    "document_id": "0123456789abcdef01234567",
+    "workspace_id": "89abcdef0123456789abcdef",
+    "element_id": "fedcba9876543210fedcba98",
+    "expected_microversion": "aaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "access-token": {
+    "valid/read-only.json": "accepted",
+    "valid/read-write.json": "accepted",
+    "invalid/null-revoked.json": "external_token_unavailable",
+    "invalid/extra-field-refresh-token.json": "external_token_unavailable",
+    "invalid/missing-read-scope.json": "external_token_unavailable",
+    "invalid/whitespace-in-token.json": "external_token_unavailable",
+    "invalid/empty-token.json": "external_token_unavailable",
+    "invalid/expires-at-in-seconds.json": "external_token_expired",
+    "invalid/expired.json": "external_token_expired"
+  },
+  "approved-update": {
+    "pairedRequest": "requests/update-feature.request.json",
+    "valid/update-feature.json": "accepted",
+    "invalid/null-no-approval.json": "mutation_approval_mismatch",
+    "invalid/expired.json": "mutation_approval_mismatch",
+    "invalid/body-mismatch.json": "mutation_approval_mismatch",
+    "invalid/version-2.json": "mutation_approval_mismatch",
+    "invalid/empty-proposal-id.json": "mutation_approval_mismatch"
+  },
+  "mcp-tools.json": "exact match against the external-token tools/list output, in order"
+}

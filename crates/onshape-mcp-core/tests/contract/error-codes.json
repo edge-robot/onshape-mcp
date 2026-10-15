@@ -1,0 +1,43 @@
+{
+  "server": [
+    "external_token_tool_denied",
+    "external_token_read_policy_denied",
+    "target_policy_denied",
+    "revision_policy_denied",
+    "target_configuration_invalid",
+    "external_token_configuration_invalid",
+    "mutation_approval_unavailable",
+    "mutation_approval_mismatch",
+    "external_private_file_unavailable",
+    "external_token_unavailable",
+    "external_token_expired",
+    "external_token_write_scope_missing",
+    "external_token_client_unavailable",
+    "external_token_request_failed",
+    "mutation_outcome_unknown_reconcile_required",
+    "external_token_auth_owned_externally",
+    "external_token_local_url_required",
+    "external_token_local_url_invalid",
+    "external_token_validation_unavailable"
+  ],
+  "plugin": [
+    "mcp_execution_disabled",
+    "mcp_discovery_failed",
+    "invalid_mcp_server",
+    "native_mcp_status_unavailable",
+    "mutation_reconciliation_required",
+    "mutation_approval_unavailable",
+    "source_revision_conflict",
+    "primary_revision_changed",
+    "mutation_outcome_unknown",
+    "mutation_verification_mismatch",
+    "protected_primary_workspace",
+    "mcp_credential_unavailable",
+    "mcp_credential_handoff_unavailable"
+  ],
+  "unknownOutcomeData": {
+    "outcome": "UNKNOWN",
+    "retryAllowed": false,
+    "reconciliationRequired": true
+  }
+}
