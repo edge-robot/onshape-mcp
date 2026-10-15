@@ -22,6 +22,10 @@ die() { echo "dev.sh: $*" >&2; exit 1; }
 [[ "$(stat -c %a "$ENV_FILE")" == 600 ]] || die "$ENV_FILE must have mode 0600"
 git_name=$(git -C "$REPO" config user.name) || die "git user.name is not set"
 git_email=$(git -C "$REPO" config user.email) || die "git user.email is not set"
+# Use the host's timezone so dates in prompt/report file names, docs and memory match
+# the architect's (the containers share the host clock; only the zone differs).
+host_tz=$(timedatectl show -p Timezone --value 2>/dev/null || true)
+host_tz=${host_tz:-Europe/Berlin}
 
 if [[ "${1:-}" == --rebuild ]]; then
   shift
@@ -44,6 +48,7 @@ args=(
   --security-opt=no-new-privileges
   --env-file "$ENV_FILE"
   -e CLAUDE_DEVCONTAINER=1
+  -e TZ="$host_tz"
   -e HOME=/home/dev
   -e GIT_AUTHOR_NAME="$git_name" -e GIT_AUTHOR_EMAIL="$git_email"
   -e GIT_COMMITTER_NAME="$git_name" -e GIT_COMMITTER_EMAIL="$git_email"
