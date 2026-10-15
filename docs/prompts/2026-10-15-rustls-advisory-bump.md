@@ -6,7 +6,7 @@ issue: edge-robot/onshape-mcp#3
 architecture-ref: clawonshape/docs/interface/onshape-mcp.md#8-security-invariants
 contract-version: 0.2.0-draft
 foreign-repo-commit: f49b76d05c448ded91f05b8498aa4b7633e99dab
-status: issued
+status: done
 ---
 # Bump rustls past RUSTSEC-2026-0346..0349 (lockfile only)
 
