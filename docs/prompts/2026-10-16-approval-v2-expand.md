@@ -7,7 +7,7 @@ architecture-ref: clawonshape/docs/interface/onshape-mcp.md#25-mutation-admissio
 contract-version: 1.0.0-draft
 foreign-repo-commit: c637cc9   # clawonshape, contract 1.0.0-draft (read-only mount)
 base-commit: c53d9c9
-status: issued
+status: done
 ---
 # Expand: admit approval file v2 with target claims (contract 1.0.0-draft, step 1 of 4)
 
