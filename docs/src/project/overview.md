@@ -158,7 +158,8 @@ I/O layer; core logic consumes authentication state and produces request effects
 The server does not initiate OAuth or refresh tokens in this mode.
 
 External-token mode exposes the generic API tools and auth status, with exact
-read-target restrictions and optional revision-bound existing-feature updates.
+read-target restrictions and optional approval- and revision-bound
+existing-feature updates.
 It omits login, screenshot and file access. See the fork's
 [target policy](../../target-policy.md) for security semantics. Other
 supported authentication modes retain the upstream tool surface.

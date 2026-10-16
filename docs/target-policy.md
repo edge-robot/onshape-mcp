@@ -6,22 +6,42 @@ workflow approval, release authority, or an agent identity check. Keep configura
 and the private network inaccessible to untrusted clients.
 
 ```toml
+[external_token]
+# file, document_id, workspace_id, element_id, read_api_version as before
+mutation_approval_file = "/run/onshape-approval/approved-update.json" # mandatory with mutation
+
 [external_token.mutation]
+# Static bounds (required)
 document_id = "aaaaaaaaaaaaaaaaaaaaaaaa"
-workspace_id = "bbbbbbbbbbbbbbbbbbbbbbbb"
 element_id = "cccccccccccccccccccccccc"
 excluded_workspace_ids = ["dddddddddddddddddddddddd"] # operator supplies Primary ID
 allowed_operations = ["updatePartStudioFeature"]
+write_mode = "modify"
+# Static pins (optional, expand step of contract 1.0.0; required for v1 approvals)
+workspace_id = "bbbbbbbbbbbbbbbbbbbbbbbb"
 feature_id = "optional_exact_feature"
 expected_microversion = "eeeeeeeeeeeeeeeeeeeeeeee"
-write_mode = "modify"
 ```
 
-These IDs are examples. The target must equal the external-token read binding.
+These IDs are examples.
+
+| Key | Required | Rule |
+|---|---|---|
+| `mutation_approval_file` | yes, if `mutation` is set | absolute path; otherwise the server refuses to start with `target_configuration_invalid` |
+| `mutation.document_id`, `mutation.element_id` | yes | must equal `[external_token]` `document_id` / `element_id` |
+| `mutation.excluded_workspace_ids` | yes, non-empty | never written; claims naming one are denied |
+| `mutation.allowed_operations` | yes, non-empty | only `updatePartStudioFeature` exists |
+| `mutation.write_mode` | no (default `read`) | `modify` is needed for any write |
+| `mutation.workspace_id` | no | if set: equals `[external_token].workspace_id`, not excluded, and every claim must equal it |
+| `mutation.feature_id` | no | if set: every claim and request must name this feature |
+| `mutation.expected_microversion` | no | if set: every claim must equal it (`revision_policy_denied`) |
+
 IDs parse into validated types; modes and operation IDs are enums. Unknown fields,
 unknown operations, malformed IDs, empty exclusions/operations, conflicting targets
-and an excluded assigned workspace fail closed. Omitting `mutation` or using the
-(default) `read` ceiling denies all mutations. An exclusion identifies a workspace
+and an excluded pinned workspace fail closed. Omitting `mutation` or using the
+(default) `read` ceiling denies all mutations. Without a workspace pin the
+mutation workspace is not tied to the read binding: it comes from the approval
+claims and may be any workspace of the configured document outside the exclusions. An exclusion identifies a workspace
 by immutable ID, not its display name; the control plane must resolve Primary and
 supply its ID. The server cannot infer which workspace is Primary from an ID alone.
 
@@ -38,9 +58,9 @@ applies to external-token reads and mutations; it does not alter targets or bodi
 The raw `onshape_api_call` tool uses the same admission boundary.
 
 Immediately before provider dispatch the server checks method/route, target,
-operation, feature, ceiling, write scope and current external credential validity.
-The JSON body must contain the configured `sourceMicroversion` and the boolean
-`rejectMicroversionSkew: true`. The payload is preserved, never patched to silently
+operation, feature, ceiling, approval, write scope and current external credential
+validity. The JSON body must contain the approved `sourceMicroversion` and the
+boolean `rejectMicroversionSkew: true`. The payload is preserved, never patched to silently
 make a caller's unguarded request valid. The vendored OpenAPI catalog declares API
 v16 for this operation; bounded updates use v16, existing read-only calls retain
 v10. Live v16 compatibility and actual provider skew rejection require separate
@@ -55,8 +75,9 @@ refresh or 401 retry runs in this mode. A transport/response-read failure, HTTP
 ```
 
 The caller must independently reconcile provider state. A successful response is
-not review, approval, or release. The fixed expected microversion lets provider CAS
-reject replay after a successful revision-changing write; it is not a durable
+not review, approval, or release. The approved expected microversion lets provider
+CAS reject replay after a successful revision-changing write, and the in-process
+consumed record rejects a second admission of the same approval; neither is a durable
 attempt ledger, and does not prove rejection of simultaneous duplicates, no-op
 writes or attempts whose provider outcome is unknown. Workflow receipts and
 reconciliation belong to the control plane. Do not enable production mutation
@@ -79,13 +100,64 @@ External-token deployments can set `read_api_version = "v16"` to retrieve featur
 payloads with the serialization/library metadata required by native updates.
 The default remains v10. Mutation dispatch remains v16 and single-attempt.
 
-`mutation_approval_file` optionally points to an operator-issued private JSON file:
-`{version:1, proposalId, expiresAt, body}`. When configured, every update additionally
-requires the exact approved JSON body and an unexpired approval. Existing target,
-operation, feature, OAuth2Write and provider CAS admission still apply. The file
-is read-only in MCP; its owner issues approvals after reviewing a concrete payload.
-Missing, insecure, expired or different approvals are rejected before provider I/O.
-This is generic execution admission, not an engineering workflow or an OAuth owner.
+## Approval file and claims
+
+`mutation_approval_file` points to a private JSON file published by the approval
+owner (same private-file rules as the token file, at most 1 MiB). It is mandatory
+whenever `[external_token.mutation]` is configured. The server only reads it; its
+owner issues approvals after reviewing a concrete payload. This is generic execution
+admission, not an engineering workflow or an OAuth owner.
+
+Version 2 carries the mutation target as claims. All fields are required and
+unknown fields are rejected:
+
+```json
+{"version": 2, "proposalId": "<uuid>", "issuedAt": 0, "expiresAt": 0,
+ "target": {"documentId": "<24-hex>", "workspaceId": "<24-hex>", "elementId": "<24-hex>"},
+ "featureId": "<feature>", "expectedMicroversion": "<24-hex>",
+ "operation": "updatePartStudioFeature", "requestHash": "…", "payloadHash": "…",
+ "body": {}}
+```
+
+`expiresAt > now` and `0 < expiresAt − issuedAt ≤ 900000` (15 minutes). The claims
+only narrow the static bounds: the claimed document and element must equal the
+configured ones, the claimed workspace must not be excluded, the operation must be
+allowlisted, and every configured pin must equal its claim. `requestHash` and
+`payloadHash` are audit fields and are not checked.
+
+Version 1 (`{version:1, proposalId, expiresAt, body}`) is deprecated. It is admitted
+only while the pins `workspace_id` and `expected_microversion` are configured, which
+then act as its claims; otherwise it is rejected with `mutation_approval_mismatch`.
+
+A mutation is admitted in this order; the first failure wins and nothing reaches
+the provider before step 10:
+
+1. `[external_token.mutation]` present (`target_policy_denied`).
+2. `modify` ceiling, `POST`, allowlisted operation, no query, JSON headers only
+   (`target_policy_denied`).
+3. Approval file readable (`mutation_approval_unavailable`).
+4. Approval structurally valid for its version and unexpired (`mutation_approval_mismatch`).
+5. Path, feature and operation equal the claims within the bounds (`target_policy_denied`).
+6. `body.sourceMicroversion` equals the claimed baseline and
+   `rejectMicroversionSkew` is `true` (`revision_policy_denied`).
+7. Approved body equals the request body exactly (`mutation_approval_mismatch`).
+8. `proposalId` not yet admitted by this process (`mutation_approval_consumed`).
+9. Credential valid with `OAuth2Write` (`external_token_*`).
+10. Record `proposalId` as consumed, then a single dispatch attempt.
+
+The consumed record is in memory, shared by v1 and v2, and bounded to the last
+1024 admitted proposal IDs. It is not persisted; after a restart the provider CAS
+(`rejectMicroversionSkew`) still rejects a second application of the same body.
+A consumed approval is never admitted again, even if its dispatch outcome was
+`UNKNOWN`; reconcile instead.
+
+While a valid v2 approval is active (`now < expiresAt`, consumed or not) and its
+claims lie within the static bounds, the reads
+`/documents/d/{d}/w/{claimed}/currentmicroversion` and
+`/partstudios/d/{d}/w/{claimed}/e/{e}/features` are admitted in addition to the
+configured read set, so the Candidate can be verified after the update. `{d}` and
+`{e}` stay the configured target. A missing, insecure, unreadable, `null`, v1 or
+expired approval adds nothing.
 
 A future verified VC/VP can replace local-file issuer trust and supply subject,
 audience, target, operation, payload digest, source revision, approval and expiry
