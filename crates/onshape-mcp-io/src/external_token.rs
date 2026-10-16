@@ -41,6 +41,10 @@ pub fn validate_config(config: &ExternalTokenConfig) -> Result<(), &'static str>
     {
         return Err("external_token_configuration_invalid");
     }
+    // Mandatory approval (contract §8.8): refuse to start without it.
+    config
+        .require_mutation_approval_file()
+        .map_err(|_| "target_configuration_invalid")?;
     if let Some(policy) = &config.mutation {
         policy
             .validate(
@@ -520,5 +524,22 @@ mod tests {
         c.read_api_version = None;
         c.mutation_approval_file = Some("relative.json".into());
         assert!(validate_config(&c).is_err());
+    }
+    fn bounds() -> onshape_mcp_core::target_policy::TargetConstraint {
+        serde_json::from_value(serde_json::json!({"document_id":"a".repeat(24),
+            "element_id":"c".repeat(24),"excluded_workspace_ids":["d".repeat(24)],
+            "allowed_operations":["updatePartStudioFeature"],"write_mode":"modify"}))
+        .unwrap()
+    }
+    #[test]
+    fn mutation_without_approval_file_refuses_to_start() {
+        let mut c = config("/run/onshape/token.json".into());
+        c.mutation = Some(bounds());
+        assert_eq!(validate_config(&c), Err("target_configuration_invalid"));
+        c.mutation_approval_file = Some("/run/onshape/approved-update.json".into());
+        assert_eq!(validate_config(&c), Ok(()));
+        // Unpinned bounds no longer require the read workspace to match.
+        c.workspace_id = "d".repeat(24);
+        assert_eq!(validate_config(&c), Ok(()));
     }
 }

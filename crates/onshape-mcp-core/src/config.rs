@@ -181,12 +181,31 @@ pub struct ExternalTokenConfig {
     /// Optional, operator-provisioned bounded mutation authority.
     #[serde(default)]
     pub mutation: Option<crate::target_policy::TargetConstraint>,
-    /// Optional private operator approval; request body must match it exactly.
+    /// Private approval file published by the approval owner (contract §4).
+    /// Mandatory whenever `mutation` is configured; see
+    /// [`Self::require_mutation_approval_file`].
     #[serde(default)]
     pub mutation_approval_file: Option<std::path::PathBuf>,
     /// Native feature reads may use v16 to prepare compatible update payloads.
     #[serde(default)]
     pub read_api_version: Option<String>,
+}
+
+impl ExternalTokenConfig {
+    /// Contract §2.5 step 3 and §8.8: a server with `[external_token.mutation]`
+    /// must also have `mutation_approval_file`, otherwise it does not start.
+    ///
+    /// # Errors
+    /// [`PolicyError::InvalidConfiguration`](crate::target_policy::PolicyError)
+    /// (`target_configuration_invalid`) if mutation bounds lack an approval file.
+    pub const fn require_mutation_approval_file(
+        &self,
+    ) -> Result<(), crate::target_policy::PolicyError> {
+        if self.mutation.is_some() && self.mutation_approval_file.is_none() {
+            return Err(crate::target_policy::PolicyError::InvalidConfiguration);
+        }
+        Ok(())
+    }
 }
 
 // ============================================================================
