@@ -8,11 +8,17 @@
 
 use std::path::PathBuf;
 
+use onshape_client_core::request::{ApiRequest, RequestBody};
+use onshape_mcp_core::approval::{
+    AdmissionError, ConsumedProposals, admit_mutation, claimed_read_workspace, read_admitted,
+};
+use onshape_mcp_core::config::{AppConfig, ExternalTokenConfig};
+use onshape_mcp_core::target_policy::TargetConstraint;
 use onshape_mcp_core::tools::{EXTERNAL_TOKEN_TOOL_NAMES, list_tools_external_token};
 use serde_json::Value;
 
 /// Contract version this crate is implemented against.
-const CONTRACT_VERSION: &str = "0.2.0-draft";
+const CONTRACT_VERSION: &str = "1.0.0-draft";
 
 fn contract_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -160,4 +166,462 @@ fn first_difference_names_the_first_differing_key() {
         first_difference(&serde_json::json!([1]), &serde_json::json!([1, 2]), "").as_deref(),
         Some(" (array length: code 1 vs snapshot 2)")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Channel C: approval file v1/v2 and mutation admission (§2.5, §4, §10)
+// ---------------------------------------------------------------------------
+
+fn read_contract_json(name: &str) -> Result<Value, String> {
+    serde_json::from_str(&read_contract_file(name)?).map_err(|e| format!("{name} is not JSON: {e}"))
+}
+
+fn expectations() -> Result<Value, String> {
+    read_contract_json("expectations.json")
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+fn str_field<'a>(value: &'a Value, pointer: &str) -> Result<&'a str, String> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("expectations.json lacks string {pointer}"))
+}
+
+/// The paired request of `expectations.json` `approved-update.pairedRequest`.
+fn paired_request(expectations: &Value) -> Result<ApiRequest, String> {
+    let name = str_field(expectations, "/approved-update/pairedRequest")?;
+    let raw = read_contract_json(&format!("approved-update/{name}"))?;
+    let method = str_field(&raw, "/method")?;
+    let query = raw
+        .get("query_params")
+        .and_then(Value::as_array)
+        .ok_or("paired request lacks query_params")?;
+    if !query.is_empty() {
+        return Err("paired request unexpectedly has query parameters".into());
+    }
+    Ok(ApiRequest {
+        method: method
+            .parse()
+            .map_err(|e| format!("bad method {method}: {e}"))?,
+        path: str_field(&raw, "/path")?.to_owned(),
+        query_params: vec![],
+        headers: http::HeaderMap::new(),
+        body: Some(RequestBody::Json(
+            raw.get("body")
+                .cloned()
+                .ok_or("paired request lacks body")?,
+        )),
+        content_type: Some("application/json".into()),
+    })
+}
+
+/// Static v2 bounds only (`boundsV2`, no workspace/feature/microversion pins).
+fn bounds_policy(expectations: &Value) -> Result<TargetConstraint, String> {
+    let mut bounds = expectations
+        .get("boundsV2")
+        .cloned()
+        .ok_or("expectations.json lacks boundsV2")?;
+    if let Some(object) = bounds.as_object_mut() {
+        object.remove("_comment");
+    }
+    serde_json::from_value(bounds).map_err(|e| format!("boundsV2 is not a TargetConstraint: {e}"))
+}
+
+/// Static bounds plus the v1 `target` pins (`workspace_id`, `expected_microversion`).
+fn pinned_policy(expectations: &Value) -> Result<TargetConstraint, String> {
+    let mut bounds = expectations
+        .get("boundsV2")
+        .cloned()
+        .ok_or("expectations.json lacks boundsV2")?;
+    let target = expectations
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or("expectations.json lacks target")?;
+    let object = bounds.as_object_mut().ok_or("boundsV2 is not an object")?;
+    object.remove("_comment");
+    for (key, value) in target {
+        object.insert(key.clone(), value.clone());
+    }
+    serde_json::from_value(bounds)
+        .map_err(|e| format!("pinned target is not a TargetConstraint: {e}"))
+}
+
+/// Run the real admission (§2.5 steps 1–8) and map the result to the
+/// `expectations.json` vocabulary.
+fn admission_result(
+    policy: &TargetConstraint,
+    request: &ApiRequest,
+    approval: &Value,
+    consumed: &mut ConsumedProposals,
+) -> String {
+    match admit_mutation(
+        Some(policy),
+        request,
+        || Some(approval.clone()),
+        now_ms(),
+        consumed,
+    ) {
+        Ok(admitted) => {
+            consumed.record(admitted);
+            "accepted".to_owned()
+        }
+        Err(error) => error.code().to_owned(),
+    }
+}
+
+/// Fixture names (`valid/…`, `invalid/…`) and their expected results.
+fn approval_fixture_expectations(expectations: &Value) -> Result<Vec<(String, String)>, String> {
+    let entries = expectations
+        .get("approved-update")
+        .and_then(Value::as_object)
+        .ok_or("expectations.json lacks approved-update")?;
+    let mut out = Vec::new();
+    for (name, expected) in entries {
+        if name.starts_with("valid/") || name.starts_with("invalid/") {
+            let expected = expected
+                .as_str()
+                .ok_or_else(|| format!("expectation for {name} is not a string"))?;
+            out.push((name.clone(), expected.to_owned()));
+        }
+    }
+    Ok(out)
+}
+
+fn is_v2(fixture: &Value) -> bool {
+    fixture.get("version").and_then(Value::as_u64) == Some(2)
+}
+
+#[test]
+fn every_approval_fixture_is_listed_in_expectations() -> Result<(), String> {
+    let listed: Vec<String> = approval_fixture_expectations(&expectations()?)?
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    for kind in ["valid", "invalid"] {
+        let dir = contract_path(&format!("approved-update/{kind}"));
+        let entries =
+            std::fs::read_dir(&dir).map_err(|e| format!("cannot list {}: {e}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = format!("{kind}/{}", entry.file_name().to_string_lossy());
+            assert!(listed.contains(&name), "{name} has no expectation");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn approval_fixtures_with_v1_target_pins() -> Result<(), String> {
+    let expectations = expectations()?;
+    let request = paired_request(&expectations)?;
+    let policy = pinned_policy(&expectations)?;
+    for (name, expected) in approval_fixture_expectations(&expectations)? {
+        let fixture = read_contract_json(&format!("approved-update/{name}"))?;
+        let actual = admission_result(
+            &policy,
+            &request,
+            &fixture,
+            &mut ConsumedProposals::default(),
+        );
+        assert_eq!(actual, expected, "pinned mode: {name}");
+    }
+    Ok(())
+}
+
+#[test]
+fn approval_v2_fixtures_with_static_bounds_only() -> Result<(), String> {
+    let expectations = expectations()?;
+    let request = paired_request(&expectations)?;
+    let policy = bounds_policy(&expectations)?;
+    let mut v2_count = 0;
+    for (name, expected) in approval_fixture_expectations(&expectations)? {
+        let fixture = read_contract_json(&format!("approved-update/{name}"))?;
+        // A v1 approval is admitted only with static pins (§2.5, §4). Without
+        // them every v1 (and non-v2) fixture is rejected at step 4.
+        let expected = if is_v2(&fixture) || name.contains("/v2-") {
+            v2_count += 1;
+            expected
+        } else {
+            "mutation_approval_mismatch".to_owned()
+        };
+        let actual = admission_result(
+            &policy,
+            &request,
+            &fixture,
+            &mut ConsumedProposals::default(),
+        );
+        assert_eq!(actual, expected, "bounds-only mode: {name}");
+    }
+    assert_eq!(
+        v2_count, 10,
+        "expected one valid and nine invalid v2 fixtures"
+    );
+    Ok(())
+}
+
+#[test]
+fn approval_replay_is_consumed_without_dispatch() -> Result<(), String> {
+    let expectations = expectations()?;
+    assert!(
+        str_field(&expectations, "/approved-update/replay")?.contains("mutation_approval_consumed")
+    );
+    let request = paired_request(&expectations)?;
+    let v1 = read_contract_json("approved-update/valid/update-feature.json")?;
+    let v2 = read_contract_json("approved-update/valid/update-feature-v2.json")?;
+    for (policy, approvals) in [
+        (pinned_policy(&expectations)?, vec![&v1, &v2]),
+        (bounds_policy(&expectations)?, vec![&v2]),
+    ] {
+        // One record per server process, shared by v1 and v2.
+        let mut consumed = ConsumedProposals::default();
+        for approval in approvals {
+            assert_eq!(
+                admission_result(&policy, &request, approval, &mut consumed),
+                "accepted"
+            );
+            let mut file_reads = 0;
+            let second = admit_mutation(
+                Some(&policy),
+                &request,
+                || {
+                    file_reads += 1;
+                    Some(approval.clone())
+                },
+                now_ms(),
+                &consumed,
+            );
+            // No AdmittedProposal is handed out, so the caller cannot reach
+            // the token check (step 9) or the dispatch (step 10).
+            assert_eq!(
+                second.err().map(|e| e.code()),
+                Some("mutation_approval_consumed")
+            );
+            assert_eq!(file_reads, 1);
+        }
+    }
+    Ok(())
+}
+
+fn deployed_config_toml(target: &Value, approval_file: bool) -> Result<String, String> {
+    let d = str_field(target, "/document_id")?;
+    let w = str_field(target, "/workspace_id")?;
+    let e = str_field(target, "/element_id")?;
+    let mv = str_field(target, "/expected_microversion")?;
+    let approval = if approval_file {
+        "mutation_approval_file = \"/run/onshape-approval/approved-update.json\"\n"
+    } else {
+        ""
+    };
+    Ok(format!(
+        r#"[external_token]
+file = "/run/onshape-credentials/access-token.json"
+document_id = "{d}"
+workspace_id = "{w}"
+element_id = "{e}"
+read_api_version = "v16"
+{approval}
+[external_token.mutation]
+document_id = "{d}"
+workspace_id = "{w}"
+element_id = "{e}"
+excluded_workspace_ids = ["eeeeeeeeeeeeeeeeeeeeeeee"]
+allowed_operations = ["updatePartStudioFeature"]
+feature_id = "FabcDEF123_0"
+expected_microversion = "{mv}"
+write_mode = "modify"
+"#
+    ))
+}
+
+fn external_token(toml_text: &str) -> Result<ExternalTokenConfig, String> {
+    let config: AppConfig =
+        toml::from_str(toml_text).map_err(|e| format!("config does not parse: {e}"))?;
+    config
+        .external_token
+        .ok_or_else(|| "no [external_token]".to_owned())
+}
+
+/// Regression: the currently deployed config shape (static pins, v1 approvals
+/// from plugin 0.2.10) still parses, validates and admits the v1 fixture.
+#[test]
+fn deployed_config_shape_admits_v1_fixture() -> Result<(), String> {
+    let expectations = expectations()?;
+    let target = expectations.get("target").ok_or("no target")?;
+    let config = external_token(&deployed_config_toml(target, true)?)?;
+    assert_eq!(config.require_mutation_approval_file(), Ok(()));
+    let policy = config.mutation.as_ref().ok_or("no mutation policy")?;
+    assert_eq!(
+        policy.validate(
+            &config.document_id,
+            &config.workspace_id,
+            &config.element_id
+        ),
+        Ok(())
+    );
+    let request = paired_request(&expectations)?;
+    let v1 = read_contract_json("approved-update/valid/update-feature.json")?;
+    assert_eq!(
+        admission_result(policy, &request, &v1, &mut ConsumedProposals::default()),
+        "accepted"
+    );
+    Ok(())
+}
+
+#[test]
+fn missing_approval_file_refuses_start() -> Result<(), String> {
+    let expectations = expectations()?;
+    assert!(
+        str_field(&expectations, "/approved-update/missingApprovalFile")?
+            .contains("target_configuration_invalid")
+    );
+    let target = expectations.get("target").ok_or("no target")?;
+    let config = external_token(&deployed_config_toml(target, false)?)?;
+    assert_eq!(
+        config
+            .require_mutation_approval_file()
+            .map_err(|e| e.to_string()),
+        Err("target_configuration_invalid".to_owned())
+    );
+    Ok(())
+}
+
+/// Read target is the Primary (excluded) workspace; the v2 claim names the
+/// Candidate, so the claimed reads are distinguishable from the fixed set.
+fn reads_config(expectations: &Value) -> Result<ExternalTokenConfig, String> {
+    let bounds = bounds_policy(expectations)?;
+    let mut config = external_token(&format!(
+        r#"[external_token]
+file = "/run/onshape-credentials/access-token.json"
+document_id = "{d}"
+workspace_id = "eeeeeeeeeeeeeeeeeeeeeeee"
+element_id = "{e}"
+mutation_approval_file = "/run/onshape-approval/approved-update.json"
+"#,
+        d = str_field(expectations, "/boundsV2/document_id")?,
+        e = str_field(expectations, "/boundsV2/element_id")?,
+    ))?;
+    config.mutation = Some(bounds);
+    Ok(config)
+}
+
+fn get(path: String) -> ApiRequest {
+    ApiRequest {
+        method: http::Method::GET,
+        path,
+        query_params: vec![],
+        headers: http::HeaderMap::new(),
+        body: None,
+        content_type: None,
+    }
+}
+
+#[test]
+fn reads_of_claimed_candidate_while_v2_active() -> Result<(), String> {
+    let expectations = expectations()?;
+    assert!(str_field(&expectations, "/approved-update/readsV2")?.contains("currentmicroversion"));
+    let config = reads_config(&expectations)?;
+    let d = config.document_id.clone();
+    let e = config.element_id.clone();
+    let v2 = read_contract_json("approved-update/valid/update-feature-v2.json")?;
+    let claimed = str_field(&v2, "/target/workspaceId")?.to_owned();
+    let features = get(format!("/partstudios/d/{d}/w/{claimed}/e/{e}/features"));
+    let microversion = get(format!("/documents/d/{d}/w/{claimed}/currentmicroversion"));
+
+    // Without an active approval only the configured read target is admitted.
+    assert!(!read_admitted(&config, &features, None));
+    assert!(!read_admitted(&config, &microversion, None));
+
+    let workspace =
+        claimed_read_workspace(&config, &v2, now_ms()).ok_or("valid v2 must yield a claim")?;
+    assert_eq!(workspace.as_str(), claimed);
+    assert!(read_admitted(&config, &features, Some(&workspace)));
+    assert!(read_admitted(&config, &microversion, Some(&workspace)));
+    // Only those two paths; {d} and {e} stay the configured target.
+    for path in [
+        format!("/documents/d/{d}/w/{claimed}/elements"),
+        format!(
+            "/partstudios/d/{d}/w/{claimed}/e/{}/features",
+            "1".repeat(24)
+        ),
+        format!(
+            "/partstudios/d/{}/w/{claimed}/e/{e}/features",
+            "1".repeat(24)
+        ),
+        format!("/partstudios/d/{d}/w/{claimed}/e/{e}/features/featureid/FabcDEF123_0"),
+    ] {
+        assert!(
+            !read_admitted(&config, &get(path.clone()), Some(&workspace)),
+            "{path}"
+        );
+    }
+    // Configured reads stay admitted with or without the claim.
+    let configured = get(format!(
+        "/partstudios/d/{d}/w/{}/e/{e}/features",
+        config.workspace_id
+    ));
+    assert!(read_admitted(&config, &configured, None));
+    assert!(read_admitted(&config, &configured, Some(&workspace)));
+    Ok(())
+}
+
+#[test]
+fn inactive_or_invalid_approval_adds_no_reads() -> Result<(), String> {
+    let expectations = expectations()?;
+    let config = reads_config(&expectations)?;
+    for name in [
+        "invalid/null-no-approval.json",
+        "invalid/v2-expired.json",
+        "invalid/v2-lifetime-over-15min.json",
+        "invalid/v2-missing-target.json",
+        "invalid/v2-document-outside-bounds.json",
+        "valid/update-feature.json",
+    ] {
+        let fixture = read_contract_json(&format!("approved-update/{name}"))?;
+        assert_eq!(
+            claimed_read_workspace(&config, &fixture, now_ms()),
+            None,
+            "{name}"
+        );
+    }
+    // Unreadable files reach the core as non-JSON values or not at all.
+    assert_eq!(
+        claimed_read_workspace(&config, &Value::String("garbage".into()), now_ms()),
+        None
+    );
+    // `now == expiresAt` is no longer active.
+    let v2 = read_contract_json("approved-update/valid/update-feature-v2.json")?;
+    let expires_at = v2
+        .get("expiresAt")
+        .and_then(Value::as_i64)
+        .ok_or("no expiresAt")?;
+    assert_eq!(claimed_read_workspace(&config, &v2, expires_at), None);
+    // Without a mutation policy no claim is honoured.
+    let mut read_only = config.clone();
+    read_only.mutation = None;
+    assert_eq!(claimed_read_workspace(&read_only, &v2, now_ms()), None);
+    Ok(())
+}
+
+#[test]
+fn admission_codes_are_listed_in_contract() -> Result<(), String> {
+    let codes = read_contract_json("error-codes.json")?;
+    let server: Vec<&str> = codes
+        .get("server")
+        .and_then(Value::as_array)
+        .ok_or("error-codes.json lacks server")?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    for error in AdmissionError::ALL {
+        assert!(
+            server.contains(&error.code()),
+            "{} not in contract",
+            error.code()
+        );
+    }
+    Ok(())
 }
