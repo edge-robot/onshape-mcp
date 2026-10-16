@@ -1,5 +1,5 @@
 {
-  "contractVersion": "0.2.0-draft",
+  "contractVersion": "1.0.0-draft",
   "target": {
     "document_id": "0123456789abcdef01234567",
     "workspace_id": "89abcdef0123456789abcdef",
@@ -23,8 +23,37 @@
     "invalid/null-no-approval.json": "mutation_approval_mismatch",
     "invalid/expired.json": "mutation_approval_mismatch",
     "invalid/body-mismatch.json": "mutation_approval_mismatch",
-    "invalid/version-2.json": "mutation_approval_mismatch",
-    "invalid/empty-proposal-id.json": "mutation_approval_mismatch"
+    "invalid/empty-proposal-id.json": "mutation_approval_mismatch",
+    "invalid/version-3.json": "mutation_approval_mismatch",
+    "valid/update-feature-v2.json": "accepted",
+    "invalid/v2-expired.json": "mutation_approval_mismatch",
+    "invalid/v2-lifetime-over-15min.json": "mutation_approval_mismatch",
+    "invalid/v2-missing-target.json": "mutation_approval_mismatch",
+    "invalid/v2-operation-not-allowed.json": "target_policy_denied",
+    "invalid/v2-document-outside-bounds.json": "target_policy_denied",
+    "invalid/v2-workspace-claim-differs.json": "target_policy_denied",
+    "invalid/v2-feature-claim-differs.json": "target_policy_denied",
+    "invalid/v2-microversion-claim-differs.json": "revision_policy_denied",
+    "invalid/v2-body-mismatch.json": "mutation_approval_mismatch",
+    "replay": "a second admission of the same valid approval (v1 or v2) in the same server process yields mutation_approval_consumed, with no provider I/O",
+    "missingApprovalFile": "with [external_token.mutation] configured and no mutation_approval_file, the server refuses to start: target_configuration_invalid",
+    "readsV2": "while valid/update-feature-v2.json is active (expiresAt > now), GET /partstudios/d/{d}/w/{claimed workspaceId}/e/{e}/features and /documents/d/{d}/w/{claimed workspaceId}/currentmicroversion are admitted in addition to the configured read target"
   },
-  "mcp-tools.json": "exact match against the external-token tools/list output, in order"
+  "mcp-tools.json": "exact match against the external-token tools/list output, in order",
+  "mutation-context": {
+    "pairedApproval": "approved-update/valid/update-feature.json",
+    "valid/update-feature.json": "equal to executionContext output (ignoring expiresAt); apiCall validates against mcp-tools.json onshape_api_call inputSchema"
+  },
+  "boundsV2": {
+    "_comment": "Static mutation bounds for v2 fixtures (no workspace, feature or microversion pins). With the v1 'target' pins configured instead (expand step), every v2 fixture yields the same result, because its claims equal those pins.",
+    "document_id": "0123456789abcdef01234567",
+    "element_id": "fedcba9876543210fedcba98",
+    "excluded_workspace_ids": [
+      "eeeeeeeeeeeeeeeeeeeeeeee"
+    ],
+    "allowed_operations": [
+      "updatePartStudioFeature"
+    ],
+    "write_mode": "modify"
+  }
 }

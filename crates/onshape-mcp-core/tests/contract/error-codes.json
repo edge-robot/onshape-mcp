@@ -8,6 +8,7 @@
     "external_token_configuration_invalid",
     "mutation_approval_unavailable",
     "mutation_approval_mismatch",
+    "mutation_approval_consumed",
     "external_private_file_unavailable",
     "external_token_unavailable",
     "external_token_expired",
@@ -33,7 +34,12 @@
     "mutation_verification_mismatch",
     "protected_primary_workspace",
     "mcp_credential_unavailable",
-    "mcp_credential_handoff_unavailable"
+    "mcp_credential_handoff_unavailable",
+    "approval_expired_not_dispatched",
+    "invalid_arguments",
+    "authorization_changed",
+    "provider_protocol_error",
+    "proposal_body_invalid"
   ],
   "unknownOutcomeData": {
     "outcome": "UNKNOWN",

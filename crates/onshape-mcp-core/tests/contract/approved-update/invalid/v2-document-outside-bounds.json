@@ -1,0 +1,33 @@
+{
+  "version": 2,
+  "proposalId": "7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f",
+  "issuedAt": 4102444500000,
+  "expiresAt": 4102444800000,
+  "target": {
+    "documentId": "111111111111111111111111",
+    "workspaceId": "89abcdef0123456789abcdef",
+    "elementId": "fedcba9876543210fedcba98"
+  },
+  "featureId": "FabcDEF123_0",
+  "expectedMicroversion": "aaaaaaaaaaaaaaaaaaaaaaaa",
+  "operation": "updatePartStudioFeature",
+  "requestHash": "request-hash-fixture",
+  "payloadHash": "e0e0760379e951a4e954cea16300de4f1b0ae85e97a2a229492e06703e00fdd2",
+  "body": {
+    "feature": {
+      "featureId": "FabcDEF123_0",
+      "featureType": "extrude",
+      "suppressed": false,
+      "parameters": [
+        {
+          "parameterId": "depth",
+          "expression": "60 mm"
+        }
+      ]
+    },
+    "sourceMicroversion": "aaaaaaaaaaaaaaaaaaaaaaaa",
+    "rejectMicroversionSkew": true,
+    "serializationVersion": "1.2.3",
+    "libraryVersion": 2000
+  }
+}
