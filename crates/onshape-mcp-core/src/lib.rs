@@ -3,6 +3,7 @@
 //! This crate contains sans-IO business logic with no async runtime dependencies.
 //! All I/O operations are handled by the `onshape-mcp-io` crate.
 
+pub mod approval;
 pub mod config;
 pub mod target_policy;
 pub mod tools;

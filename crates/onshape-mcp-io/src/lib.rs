@@ -79,7 +79,13 @@ pub(crate) const REFRESH_MARGIN_SECS: i64 = 60;
 /// `OAuth` — Bearer token auth with refresh capability.
 /// `OAuthPending` — client creds present but awaiting tokens from auth flow.
 pub(crate) enum ApiState {
-    ExternalToken(Box<onshape_mcp_core::config::ExternalTokenConfig>, Duration),
+    /// External-token mode: config, request timeout, and the per-process
+    /// replay record of admitted approvals (contract §2.5 step 8).
+    ExternalToken(
+        Box<onshape_mcp_core::config::ExternalTokenConfig>,
+        Duration,
+        onshape_mcp_core::approval::ConsumedProposals,
+    ),
     /// Credentials are not configured or are incomplete.
     NotConfigured {
         /// What auth method was attempted.
@@ -274,7 +280,7 @@ impl ApiState {
                 configured_method: *configured_method,
                 detail: detail.clone(),
             },
-            Self::ExternalToken(config, _) => external_token::resolved_auth(config),
+            Self::ExternalToken(config, ..) => external_token::resolved_auth(config),
             Self::Basic(_) => ResolvedAuth::Basic,
             Self::OAuth(oauth) => ResolvedAuth::OAuthReady {
                 expires_at: oauth.session.tokens.expires_at,
@@ -905,8 +911,8 @@ async fn execute_raw_api_request(
         ApiState::NotConfigured { .. } | ApiState::OAuthPending(_) => {
             unreachable!("caller must check state before calling execute_raw_api_request")
         }
-        ApiState::ExternalToken(config, timeout) => {
-            external_token::execute(config, *timeout, api_req).await
+        ApiState::ExternalToken(config, timeout, consumed) => {
+            external_token::execute(config, *timeout, consumed, api_req).await
         }
         ApiState::Basic(client) => execute_basic_raw(client, api_req).await,
         // OAuth needs &mut ApiState for the potential state transition,
@@ -1612,6 +1618,7 @@ fn build_api_state(
         return Ok(ApiState::ExternalToken(
             Box::new(external.clone()),
             config.api.timeout,
+            onshape_mcp_core::approval::ConsumedProposals::default(),
         ));
     }
     if let Some(proxy_url) = config.auth.proxy_url.as_deref() {
@@ -1829,7 +1836,7 @@ pub async fn run(
             ApiState::OAuthPending(pending) => Some(pending.token_path.clone()),
             ApiState::OAuth(oauth) => Some(oauth.token_path.clone()),
             ApiState::NotConfigured { .. } => default_token_file_path(),
-            ApiState::ExternalToken(_, _) | ApiState::Basic(_) | ApiState::HttpOAuth(_) => None,
+            ApiState::ExternalToken(..) | ApiState::Basic(_) | ApiState::HttpOAuth(_) => None,
         }
     };
     let watcher_ctx = token_path.map(|token_path| {
@@ -3404,7 +3411,11 @@ mod tests {
             mutation_approval_file: None,
             read_api_version: None,
         };
-        let mut state = ApiState::ExternalToken(Box::new(config), Duration::from_secs(1));
+        let mut state = ApiState::ExternalToken(
+            Box::new(config),
+            Duration::from_secs(1),
+            onshape_mcp_core::approval::ConsumedProposals::default(),
+        );
         let initial_validation = ValidationState::default();
         let validation = tokio::sync::Mutex::new(initial_validation.clone());
         let spec = embedded_openapi_spec();
@@ -3433,6 +3444,6 @@ mod tests {
         assert_eq!(error.message, "external_token_read_policy_denied");
         assert!(error.data.is_none());
         assert_eq!(*validation.lock().await, initial_validation);
-        assert!(matches!(state, ApiState::ExternalToken(_, _)));
+        assert!(matches!(state, ApiState::ExternalToken(..)));
     }
 }

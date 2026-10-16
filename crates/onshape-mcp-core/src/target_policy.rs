@@ -20,6 +20,15 @@ pub fn permits_json_response_headers(headers: &http::HeaderMap) -> bool {
 pub struct CadId(String);
 
 impl CadId {
+    /// Whether `value` is a lowercase 24-hex provider ID.
+    #[must_use]
+    pub fn is_valid(value: &str) -> bool {
+        value.len() == 24
+            && value
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    }
+
     /// The validated 24-hex ID.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -30,11 +39,7 @@ impl CadId {
 impl TryFrom<String> for CadId {
     type Error = PolicyError;
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.len() == 24
-            && value
-                .bytes()
-                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
-        {
+        if Self::is_valid(&value) {
             Ok(Self(value))
         } else {
             Err(PolicyError::InvalidConfiguration)

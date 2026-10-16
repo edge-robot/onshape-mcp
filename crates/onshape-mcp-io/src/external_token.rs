@@ -1,12 +1,15 @@
 //! External-token mode: no OAuth exchange, persistence, watcher, or retry.
-//! Exact-target GETs and optional operator-provisioned revision-bound updates.
+//! Exact-target GETs and approval-bound, revision-bound updates (contract §2.4, §2.5).
 use super::{McpError, OnshapeMcpServer, RawResponse};
 use chrono::{DateTime, Utc};
 use oauth2::AccessToken;
-use onshape_client_core::request::{ApiRequest, RequestBody};
+use onshape_client_core::request::ApiRequest;
 use onshape_client_io::{ClientAuthConfig, ClientConfig, OnshapeClient};
+use onshape_mcp_core::approval::{
+    APPROVAL_FILE_MAX_BYTES, ConsumedProposals, admit_mutation, claimed_read_workspace,
+    read_admitted,
+};
 use onshape_mcp_core::config::{AppConfig, ExternalTokenConfig, ResolvedAuth};
-use onshape_mcp_core::target_policy::permits_json_response_headers;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use std::{fs::OpenOptions, io::Read, time::Duration};
@@ -132,89 +135,60 @@ pub fn resolved_auth(config: &ExternalTokenConfig) -> ResolvedAuth {
     }
 }
 
+/// Fixed read set for the configured target (§2.4), without approval claims.
 fn allowed(config: &ExternalTokenConfig, request: &ApiRequest) -> bool {
-    if request.method != http::Method::GET
-        || request.body.is_some()
-        || !permits_json_response_headers(&request.headers)
-        || !request.query_params.is_empty()
-    {
-        return false;
-    }
-    let d = &config.document_id;
-    let w = &config.workspace_id;
-    let e = &config.element_id;
-    let fixed = [
-        format!("/documents/{d}"),
-        format!("/documents/d/{d}/workspaces"),
-        format!("/documents/d/{d}/w/{w}/currentmicroversion"),
-        format!("/documents/d/{d}/w/{w}/elements"),
-        format!("/partstudios/d/{d}/w/{w}/e/{e}/features"),
-    ];
-    if fixed.contains(&request.path) {
+    read_admitted(config, request, None)
+}
+
+/// §2.4 including the claimed Candidate of an active v2 approval. The
+/// approval file is read only if the fixed set denies the request; an absent,
+/// insecure, unreadable, `null`, v1 or expired approval adds nothing.
+fn read_allowed(config: &ExternalTokenConfig, request: &ApiRequest, now_ms: i64) -> bool {
+    if allowed(config, request) {
         return true;
     }
-    let parts: Vec<_> = request.path.split('/').collect();
-    (parts.len() == 7
-        && parts[1..4] == ["documents", "d", d]
-        && parts[4] == "m"
-        && id(parts[5])
-        && parts[6] == "elements")
-        || (parts.len() == 9
-            && parts[1..4] == ["partstudios", "d", d]
-            && parts[4] == "m"
-            && id(parts[5])
-            && parts[6] == "e"
-            && parts[7] == e
-            && parts[8] == "features")
-}
-
-fn approval_matches(value: &serde_json::Value, request: &ApiRequest, now: i64) -> bool {
-    let Some(RequestBody::Json(body)) = &request.body else {
+    let Some(file) = &config.mutation_approval_file else {
         return false;
     };
-    value.get("version").and_then(serde_json::Value::as_u64) == Some(1)
-        && value
-            .get("expiresAt")
-            .and_then(serde_json::Value::as_i64)
-            .is_some_and(|t| t > now)
-        && value
-            .get("proposalId")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|s| !s.is_empty())
-        && value.get("body") == Some(body)
+    let Ok(approval) = private_json(file, APPROVAL_FILE_MAX_BYTES) else {
+        return false;
+    };
+    claimed_read_workspace(config, &approval, now_ms)
+        .is_some_and(|workspace| read_admitted(config, request, Some(&workspace)))
 }
 
+/// Admit and dispatch one request. Mutations follow contract §2.5 steps
+/// 1–10 in order; `consumed` is the per-process replay record.
 pub async fn execute(
     config: &ExternalTokenConfig,
     timeout: Duration,
+    consumed: &mut ConsumedProposals,
     request: &ApiRequest,
 ) -> Result<RawResponse, McpError> {
     validate_config(config).map_err(|code| McpError::invalid_request(code, None))?;
     let mutation = request.method != http::Method::GET;
-    if mutation {
-        let policy = config
-            .mutation
-            .as_ref()
-            .ok_or_else(|| McpError::invalid_request("target_policy_denied", None))?;
-        policy
-            .authorize(request)
-            .map_err(|error| McpError::invalid_request(error.to_string(), None))?;
-    } else if !allowed(config, request) {
+    let now_ms = Utc::now().timestamp_millis();
+    let admitted = if mutation {
+        // Steps 1–8; the approval file is read only after steps 1–2.
+        let approval_file = config.mutation_approval_file.as_deref();
+        let admitted = admit_mutation(
+            config.mutation.as_ref(),
+            request,
+            || approval_file.and_then(|file| private_json(file, APPROVAL_FILE_MAX_BYTES).ok()),
+            now_ms,
+            consumed,
+        )
+        .map_err(|error| McpError::invalid_request(error.code(), None))?;
+        Some(admitted)
+    } else if read_allowed(config, request, now_ms) {
+        None
+    } else {
         return Err(McpError::invalid_request(
             "external_token_read_policy_denied",
             None,
         ));
-    }
-    if mutation && let Some(file) = &config.mutation_approval_file {
-        let approval = private_json(file, 1_048_576)
-            .map_err(|_| McpError::invalid_request("mutation_approval_unavailable", None))?;
-        if !approval_matches(&approval, request, Utc::now().timestamp_millis()) {
-            return Err(McpError::invalid_request(
-                "mutation_approval_mismatch",
-                None,
-            ));
-        }
-    }
+    };
+    // Step 9.
     let c = load(config).map_err(|code| McpError::invalid_request(code, None))?;
     if mutation && !c.scopes.iter().any(|scope| scope == "OAuth2Write") {
         return Err(McpError::invalid_request(
@@ -236,6 +210,10 @@ pub async fn execute(
         timeout: Some(timeout),
     })
     .map_err(|_| McpError::internal_error("external_token_client_unavailable", None))?;
+    // Step 10: consumed before the single dispatch attempt, whatever its outcome.
+    if let Some(admitted) = admitted {
+        consumed.record(admitted);
+    }
     let response = client
         .execute(request)
         .await
@@ -416,7 +394,15 @@ mod tests {
             body: None,
             content_type: None,
         };
-        let error = execute(&c, Duration::from_secs(1), &r).await.err().unwrap();
+        let error = execute(
+            &c,
+            Duration::from_secs(1),
+            &mut ConsumedProposals::default(),
+            &r,
+        )
+        .await
+        .err()
+        .unwrap();
         assert_eq!(error.message, "target_policy_denied");
     }
     #[test]
@@ -487,25 +473,227 @@ mod tests {
             .insert(http::header::ACCEPT, http::HeaderValue::from_static("*/*"));
         assert!(!allowed(&c, &r));
     }
-    #[test]
-    fn approval_requires_exact_body_and_current_expiry() {
-        let body = serde_json::json!({"feature":{"featureId":"plate","parameters":[{"parameterId":"holeDiameter","expression":"4.5 mm"}]},"sourceMicroversion":"e".repeat(24),"rejectMicroversionSkew":true});
-        let mut request = ApiRequest {
+    fn private_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir
+    }
+    fn update_body() -> serde_json::Value {
+        serde_json::json!({"feature":{"featureId":"plate"},"sourceMicroversion":"e".repeat(24),"rejectMicroversionSkew":true})
+    }
+    fn update(workspace: &str) -> ApiRequest {
+        ApiRequest {
             method: http::Method::POST,
-            path: "/unused".into(),
+            path: format!(
+                "/partstudios/d/{}/w/{workspace}/e/{}/features/featureid/plate",
+                "a".repeat(24),
+                "c".repeat(24)
+            ),
             query_params: vec![],
             headers: http::HeaderMap::new(),
-            body: Some(RequestBody::Json(body.clone())),
+            body: Some(onshape_client_core::request::RequestBody::Json(
+                update_body(),
+            )),
+            content_type: None,
+        }
+    }
+    fn v1(expires_at: i64) -> serde_json::Value {
+        serde_json::json!({"version":1,"proposalId":"reviewed-proposal","expiresAt":expires_at,"body":update_body()})
+    }
+    fn v2(workspace: &str, now: i64) -> serde_json::Value {
+        serde_json::json!({"version":2,"proposalId":"7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f",
+            "issuedAt":now - 1_000,"expiresAt":now + 60_000,
+            "target":{"documentId":"a".repeat(24),"workspaceId":workspace,"elementId":"c".repeat(24)},
+            "featureId":"plate","expectedMicroversion":"e".repeat(24),
+            "operation":"updatePartStudioFeature","requestHash":"fake","payloadHash":"fake",
+            "body":update_body()})
+    }
+    /// The deployed shape: static pins on the read binding, v1 approvals.
+    /// The token file never exists, so a request that passes admission stops
+    /// at step 9 with `external_token_unavailable` and never reaches a client.
+    fn mutation_config(dir: &std::path::Path, pinned: bool) -> ExternalTokenConfig {
+        let mut c = config(dir.join("missing-token.json"));
+        let mut bounds = bounds();
+        if pinned {
+            bounds.workspace_id = Some("b".repeat(24).try_into().unwrap());
+            bounds.expected_microversion = Some("e".repeat(24).try_into().unwrap());
+        }
+        c.mutation = Some(bounds);
+        c.mutation_approval_file = Some(dir.join("approved-update.json"));
+        c
+    }
+    async fn run(
+        c: &ExternalTokenConfig,
+        consumed: &mut ConsumedProposals,
+        r: &ApiRequest,
+    ) -> String {
+        execute(c, Duration::from_secs(1), consumed, r)
+            .await
+            .err()
+            .unwrap()
+            .message
+            .into_owned()
+    }
+    #[tokio::test]
+    async fn v1_approval_flow_with_deployed_pins_is_unchanged() {
+        let dir = private_dir();
+        let c = mutation_config(dir.path(), true);
+        let file = c.mutation_approval_file.clone().unwrap();
+        let now = Utc::now().timestamp_millis();
+        let mut consumed = ConsumedProposals::default();
+        let r = update(&"b".repeat(24));
+        assert_eq!(
+            run(&c, &mut consumed, &r).await,
+            "mutation_approval_unavailable"
+        );
+        publish(&file, &v1(now + 60_000));
+        assert_eq!(
+            run(&c, &mut consumed, &r).await,
+            "external_token_unavailable"
+        );
+        // A failed step 9 does not consume the approval.
+        assert!(consumed.is_empty());
+        assert_eq!(
+            run(&c, &mut consumed, &r).await,
+            "external_token_unavailable"
+        );
+        publish(&file, &v1(now - 1));
+        assert_eq!(
+            run(&c, &mut consumed, &r).await,
+            "mutation_approval_mismatch"
+        );
+        publish(&file, &serde_json::Value::Null);
+        assert_eq!(
+            run(&c, &mut consumed, &r).await,
+            "mutation_approval_mismatch"
+        );
+        let mut other = v1(now + 60_000);
+        other["body"]["sourceMicroversion"] = "f".repeat(24).into();
+        publish(&file, &other);
+        assert_eq!(
+            run(&c, &mut consumed, &r).await,
+            "mutation_approval_mismatch"
+        );
+        // Insecure file.
+        publish(&file, &v1(now + 60_000));
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            run(&c, &mut consumed, &r).await,
+            "mutation_approval_unavailable"
+        );
+        // Static checks (steps 1–2) still win before the file is read.
+        let mut r = update(&"b".repeat(24));
+        r.query_params.push(("x".into(), "1".into()));
+        assert_eq!(run(&c, &mut consumed, &r).await, "target_policy_denied");
+    }
+    #[tokio::test]
+    async fn v2_claims_admit_candidate_and_v1_needs_pins() {
+        let dir = private_dir();
+        let c = mutation_config(dir.path(), false);
+        let file = c.mutation_approval_file.clone().unwrap();
+        let now = Utc::now().timestamp_millis();
+        let candidate = "9".repeat(24);
+        let mut consumed = ConsumedProposals::default();
+        publish(&file, &v2(&candidate, now));
+        assert_eq!(
+            run(&c, &mut consumed, &update(&candidate)).await,
+            "external_token_unavailable"
+        );
+        assert_eq!(
+            run(&c, &mut consumed, &update(&"b".repeat(24))).await,
+            "target_policy_denied"
+        );
+        // An excluded (Primary) workspace claim never passes.
+        publish(&file, &v2(&"d".repeat(24), now));
+        assert_eq!(
+            run(&c, &mut consumed, &update(&"d".repeat(24))).await,
+            "target_policy_denied"
+        );
+        publish(&file, &v1(now + 60_000));
+        assert_eq!(
+            run(&c, &mut consumed, &update(&"b".repeat(24))).await,
+            "mutation_approval_mismatch"
+        );
+    }
+    #[tokio::test]
+    async fn replayed_approval_is_consumed_before_token_or_dispatch() {
+        let dir = private_dir();
+        let now = Utc::now().timestamp_millis();
+        for (pinned, approval, workspace) in [
+            (true, v1(now + 60_000), "b".repeat(24)),
+            (false, v2(&"9".repeat(24), now), "9".repeat(24)),
+        ] {
+            let c = mutation_config(dir.path(), pinned);
+            let file = c.mutation_approval_file.clone().unwrap();
+            publish(&file, &approval);
+            let r = update(&workspace);
+            // Simulate the first, dispatched admission of this process: the
+            // real dispatch target is fixed to the provider, so record the
+            // admitted proposal directly as execute does before dispatch.
+            let mut consumed = ConsumedProposals::default();
+            let admitted = admit_mutation(
+                c.mutation.as_ref(),
+                &r,
+                || Some(approval.clone()),
+                now,
+                &consumed,
+            )
+            .unwrap();
+            consumed.record(admitted);
+            // The token file is missing: reaching step 9 would yield
+            // external_token_unavailable instead.
+            assert_eq!(
+                run(&c, &mut consumed, &r).await,
+                "mutation_approval_consumed"
+            );
+            assert_eq!(consumed.len(), 1);
+        }
+    }
+    #[test]
+    fn claimed_candidate_reads_follow_the_approval_file() {
+        let dir = private_dir();
+        let c = mutation_config(dir.path(), false);
+        let file = c.mutation_approval_file.clone().unwrap();
+        let now = Utc::now().timestamp_millis();
+        let candidate = "9".repeat(24);
+        let get = |path: String| ApiRequest {
+            method: http::Method::GET,
+            path,
+            query_params: vec![],
+            headers: http::HeaderMap::new(),
+            body: None,
             content_type: None,
         };
-        let approval = serde_json::json!({"version":1,"proposalId":"reviewed-proposal","expiresAt":2000,"body":body});
-        assert!(approval_matches(&approval, &request, 1000));
-        assert!(!approval_matches(&approval, &request, 2000));
-        assert!(!approval_matches(&serde_json::Value::Null, &request, 1000));
-        request.body = Some(RequestBody::Json(
-            serde_json::json!({"feature":{"featureId":"plate"},"sourceMicroversion":"e".repeat(24),"rejectMicroversionSkew":true}),
+        let (d, e) = ("a".repeat(24), "c".repeat(24));
+        let features = get(format!("/partstudios/d/{d}/w/{candidate}/e/{e}/features"));
+        let microversion = get(format!(
+            "/documents/d/{d}/w/{candidate}/currentmicroversion"
         ));
-        assert!(!approval_matches(&approval, &request, 1000));
+        let elements = get(format!("/documents/d/{d}/w/{candidate}/elements"));
+        // Missing file.
+        assert!(!read_allowed(&c, &features, now));
+        publish(&file, &v2(&candidate, now));
+        assert!(read_allowed(&c, &features, now));
+        assert!(read_allowed(&c, &microversion, now));
+        assert!(!read_allowed(&c, &elements, now));
+        // Expired.
+        assert!(!read_allowed(&c, &features, now + 60_000));
+        // Unreadable (insecure mode) and null.
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!read_allowed(&c, &features, now));
+        publish(&file, &serde_json::Value::Null);
+        assert!(!read_allowed(&c, &features, now));
+        std::fs::write(&file, b"not json").unwrap();
+        assert!(!read_allowed(&c, &features, now));
+        // Configured reads never depend on the approval file.
+        assert!(read_allowed(
+            &c,
+            &get(format!(
+                "/partstudios/d/{d}/w/{}/e/{e}/features",
+                "b".repeat(24)
+            )),
+            now
+        ));
     }
     #[test]
     fn approval_file_permissions_and_read_version_are_validated() {

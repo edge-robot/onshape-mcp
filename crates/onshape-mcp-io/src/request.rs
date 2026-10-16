@@ -25,7 +25,7 @@ impl api::RequestExecutor for Executor<'_> {
             ApiState::OAuthPending(_) => {
                 return Ok(api::RequestOutcome::ToolResult(super::oauth_pending_error()));
             }
-            ApiState::ExternalToken(_, _)
+            ApiState::ExternalToken(..)
             | ApiState::Basic(_)
             | ApiState::OAuth(_)
             | ApiState::HttpOAuth(_) => {}

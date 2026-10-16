@@ -600,7 +600,7 @@ fn inactive_or_invalid_approval_adds_no_reads() -> Result<(), String> {
         .ok_or("no expiresAt")?;
     assert_eq!(claimed_read_workspace(&config, &v2, expires_at), None);
     // Without a mutation policy no claim is honoured.
-    let mut read_only = config.clone();
+    let mut read_only = config;
     read_only.mutation = None;
     assert_eq!(claimed_read_workspace(&read_only, &v2, now_ms()), None);
     Ok(())
