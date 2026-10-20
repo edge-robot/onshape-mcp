@@ -64,7 +64,11 @@ COPY --from=builder /out/onshape-mcp /usr/local/bin/onshape-mcp
 # private-file checks for the token and approval files depend on it (contract §1, G7).
 USER 1000:1000
 EXPOSE 8080
-# No HEALTHCHECK: distroless has no curl. Clawake keeps the current image until the
-# planned `onshape-mcp healthcheck` subcommand exists (contract §1).
+# Distroless has no shell or curl, so the binary probes itself: `onshape-mcp healthcheck`
+# GETs http://127.0.0.1:8080/health (add --ready for /health/ready) and exits 0 only on
+# HTTP 200. It reads no config, token or approval file (contract §1, edge-robot/onshape-mcp#4).
+# Podman keeps HEALTHCHECK only with `--format docker`; Clawake's quadlet HealthCmd is
+# authoritative (edge-robot/clawake#39).
+HEALTHCHECK CMD ["/usr/local/bin/onshape-mcp","healthcheck"]
 ENTRYPOINT ["/usr/local/bin/onshape-mcp"]
 CMD ["http"]
