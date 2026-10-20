@@ -35,7 +35,8 @@ fn healthcheck(args: &[&str]) -> Result<Output, String> {
 }
 
 /// Serve one connection: record the request line, answer with `response`.
-fn serve_once(response: &'static str) -> Result<(u16, JoinHandle<String>), String> {
+fn serve_once(response: impl Into<String>) -> Result<(u16, JoinHandle<String>), String> {
+    let response: String = response.into();
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let handle = std::thread::spawn(move || {
@@ -212,5 +213,27 @@ fn zero_timeout_exits_two() -> TestResult {
         stderr_lines(&output),
         ["healthcheck: invalid argument: timeout-ms must be greater than 0"]
     );
+    Ok(())
+}
+
+#[test]
+fn closed_without_status_line_exits_one() -> TestResult {
+    let (port, server) = serve_once("")?;
+    let url = format!("http://127.0.0.1:{port}/health");
+    let output = healthcheck(&["--url", &url])?;
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(stderr_lines(&output), ["healthcheck: invalid response"]);
+    server.join().map_err(|_| "server panicked")?;
+    Ok(())
+}
+
+#[test]
+fn overlong_status_line_exits_one() -> TestResult {
+    let (port, server) = serve_once(format!("HTTP/1.1 200 {}", "x".repeat(4096)))?;
+    let url = format!("http://127.0.0.1:{port}/health");
+    let output = healthcheck(&["--url", &url])?;
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(stderr_lines(&output), ["healthcheck: invalid response"]);
+    server.join().map_err(|_| "server panicked")?;
     Ok(())
 }
