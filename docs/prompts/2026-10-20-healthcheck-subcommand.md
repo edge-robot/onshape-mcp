@@ -7,7 +7,7 @@ architecture-ref: clawonshape/docs/interface/onshape-mcp.md#1-topology-and-lifec
 contract-version: 1.0.0-draft
 foreign-repo-commit: b63a82b   # clawonshape, branch demo/gateway-native-read-20261014 (read-only mount)
 base-commit: acceacd
-status: issued
+status: done
 ---
 # `onshape-mcp healthcheck` subcommand and SIGTERM shutdown (#4)
 
