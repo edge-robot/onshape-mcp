@@ -1898,6 +1898,93 @@ fn streamable_http_server_config(
     )
 }
 
+/// Upper bound for draining in-flight requests after a shutdown signal.
+///
+/// Together with the binary's 1 s runtime shutdown bound this keeps a stop
+/// below 5 s. Requests still running afterwards are cancelled, never retried.
+const SHUTDOWN_DRAIN: Duration = Duration::from_secs(3);
+
+/// Resolve on the first SIGTERM or SIGINT (Ctrl+C).
+///
+/// A signal whose handler cannot be installed never resolves, so a failed
+/// installation does not stop the server.
+async fn shutdown_signal() {
+    let interrupt = async {
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = interrupt => {}
+        () = terminate => {}
+    }
+}
+
+/// Serve `app` until SIGTERM or SIGINT, then shut down gracefully.
+///
+/// See [`serve_with_shutdown`]; the drain bound is [`SHUTDOWN_DRAIN`].
+async fn serve_until_shutdown(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+    cancellation_token: tokio_util::sync::CancellationToken,
+) -> std::io::Result<()> {
+    serve_with_shutdown(
+        listener,
+        app,
+        cancellation_token,
+        shutdown_signal(),
+        SHUTDOWN_DRAIN,
+    )
+    .await
+}
+
+/// Serve `app` until `signal` resolves, then drain for at most `drain`.
+///
+/// On the signal, `cancellation_token` is cancelled (ending MCP sessions and
+/// streams), the listener stops accepting, and in-flight requests get `drain`
+/// to finish. After that this returns `Ok(())` without waiting further; the
+/// remaining connection tasks are dropped when the caller's runtime shuts down.
+async fn serve_with_shutdown(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+    cancellation_token: tokio_util::sync::CancellationToken,
+    signal: impl std::future::Future<Output = ()> + Send + 'static,
+    drain: Duration,
+) -> std::io::Result<()> {
+    use std::future::IntoFuture as _;
+
+    let signalled = tokio_util::sync::CancellationToken::new();
+    let trigger = signalled.clone();
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            signal.await;
+            cancellation_token.cancel();
+            trigger.cancel();
+        })
+        .into_future();
+    tokio::select! {
+        result = server => result,
+        () = async {
+            signalled.cancelled().await;
+            tokio::time::sleep(drain).await;
+        } => {
+            eprintln!("Shutdown drain deadline reached; cancelling in-flight requests");
+            Ok(())
+        }
+    }
+}
+
 /// Runs the MCP server over Streamable HTTP transport.
 ///
 /// Serves both the OAuth endpoints (metadata, DCR, authorize, callback, token)
@@ -2074,14 +2161,7 @@ pub async fn run_http(
     eprintln!("Public URL: {public_url}");
     eprintln!("MCP endpoint: {mcp_endpoint}");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            // Ignore errors from ctrl_c — if we can't install the handler,
-            // we simply won't have graceful shutdown on Ctrl+C.
-            let _ = tokio::signal::ctrl_c().await;
-            cancellation_token.cancel();
-        })
-        .await?;
+    serve_until_shutdown(listener, app, cancellation_token).await?;
 
     Ok(())
 }
@@ -3445,5 +3525,121 @@ mod tests {
         assert!(error.data.is_none());
         assert_eq!(*validation.lock().await, initial_validation);
         assert!(matches!(state, ApiState::ExternalToken(..)));
+    }
+
+    /// Start `serve_with_shutdown` with a `/work` route that signals entry and
+    /// then waits `work` (forever if `None`) before answering 200.
+    async fn shutdown_fixture(
+        work: Option<Duration>,
+        drain: Duration,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::sync::oneshot::Sender<()>,
+        Arc<tokio::sync::Notify>,
+        tokio_util::sync::CancellationToken,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+    ) {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let entered_in_handler = Arc::clone(&entered);
+        let app = axum::Router::new().route(
+            "/work",
+            axum::routing::get(move || {
+                let entered = Arc::clone(&entered_in_handler);
+                async move {
+                    entered.notify_one();
+                    match work {
+                        Some(duration) => tokio::time::sleep(duration).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                    axum::http::StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("should bind");
+        let address = listener.local_addr().expect("should have local address");
+        let (signal_tx, signal_rx) = tokio::sync::oneshot::channel::<()>();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let server = tokio::spawn(serve_with_shutdown(
+            listener,
+            app,
+            cancel.clone(),
+            async move {
+                let _ = signal_rx.await;
+            },
+            drain,
+        ));
+        (address, signal_tx, entered, cancel, server)
+    }
+
+    async fn get_work(address: std::net::SocketAddr) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let mut stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("should connect");
+        stream
+            .write_all(b"GET /work HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("should write request");
+        let mut response = String::new();
+        let _ = stream.read_to_string(&mut response).await;
+        response
+    }
+
+    #[tokio::test]
+    async fn shutdown_lets_in_flight_request_finish_within_drain() {
+        let (address, signal, entered, cancel, server) =
+            shutdown_fixture(Some(Duration::from_millis(300)), Duration::from_secs(5)).await;
+        let client = tokio::spawn(get_work(address));
+        entered.notified().await;
+        signal.send(()).expect("server should await the signal");
+
+        let response = client.await.expect("client task should finish");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let result = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("server should stop after draining")
+            .expect("server task should not panic");
+        assert!(result.is_ok(), "{result:?}");
+        assert!(cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_stuck_request_after_drain_deadline() {
+        let drain = Duration::from_millis(200);
+        let (address, signal, entered, cancel, server) = shutdown_fixture(None, drain).await;
+        let client = tokio::spawn(get_work(address));
+        entered.notified().await;
+        let started = std::time::Instant::now();
+        signal.send(()).expect("server should await the signal");
+
+        let result = tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .expect("server should stop at the drain deadline")
+            .expect("server task should not panic");
+        let elapsed = started.elapsed();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(elapsed >= drain, "{elapsed:?}");
+        assert!(cancel.is_cancelled());
+        // axum spawns connection tasks, so the stuck one ends only with the
+        // runtime (the binary bounds that with `shutdown_timeout`).
+        client.abort();
+    }
+
+    #[tokio::test]
+    async fn serve_runs_until_signal() {
+        let (address, signal, _entered, cancel, server) =
+            shutdown_fixture(Some(Duration::ZERO), Duration::from_secs(1)).await;
+        assert!(get_work(address).await.starts_with("HTTP/1.1 200"));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!server.is_finished());
+        assert!(!cancel.is_cancelled());
+        drop(signal);
+        let result = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("server should stop")
+            .expect("server task should not panic");
+        assert!(result.is_ok(), "{result:?}");
     }
 }

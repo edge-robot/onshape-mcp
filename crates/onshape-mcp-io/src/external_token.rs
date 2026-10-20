@@ -308,12 +308,7 @@ pub async fn run_http(
             }),
         );
     let listener = tokio::net::TcpListener::bind((host.as_str(), port)).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            cancel.cancel();
-        })
-        .await?;
+    super::serve_until_shutdown(listener, app, cancel).await?;
     Ok(())
 }
 
