@@ -1451,6 +1451,48 @@ mod tests {
     }
 
     #[test]
+    fn goal_reads_require_the_plain_get_shape() {
+        let config = ExternalTokenConfig {
+            file: "/run/token.json".into(),
+            document_id: id('a'),
+            workspace_id: id('d'),
+            element_id: id('c'),
+            mutation: Some(bounds()),
+            mutation_approval_file: None,
+            goal_grant_file: None,
+            dispatch_journal_dir: None,
+            read_api_version: None,
+        };
+        let now = 1_000_000;
+        let workspace = grant_read_workspace(&config, &grant(now), now).unwrap();
+        let ok = ApiRequest {
+            method: http::Method::GET,
+            path: format!("/documents/d/{}/w/{}/elements", id('a'), id('9')),
+            query_params: vec![],
+            headers: http::HeaderMap::new(),
+            content_type: None,
+            body: None,
+        };
+        assert!(goal_read_admitted(&config, &ok, &workspace));
+        let mut post = ok.clone();
+        post.method = http::Method::POST;
+        let mut query = ok.clone();
+        query.query_params.push(("x".into(), "1".into()));
+        let mut body = ok.clone();
+        body.body = Some(RequestBody::Json(json!({})));
+        let mut header = ok;
+        header
+            .headers
+            .insert(http::header::ACCEPT, http::HeaderValue::from_static("*/*"));
+        for request in [post, query, body, header] {
+            assert!(!goal_read_admitted(&config, &request, &workspace));
+        }
+        let mut read_only = config;
+        read_only.mutation = None;
+        assert_eq!(grant_read_workspace(&read_only, &grant(now), now), None);
+    }
+
+    #[test]
     fn codes_match_display() {
         for error in GoalAdmissionError::ALL {
             assert_eq!(error.to_string(), error.code());
