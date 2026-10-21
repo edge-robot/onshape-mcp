@@ -65,6 +65,7 @@
     "dispatches": 2,
     "remaining": 8,
     "unreconciledSequence": null,
+    "unreconciledEntry": null,
     "lastOutcome": "OK",
     "lastVerification": null
   },

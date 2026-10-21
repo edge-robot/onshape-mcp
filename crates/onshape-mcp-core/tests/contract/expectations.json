@@ -1,5 +1,5 @@
 {
-  "contractVersion": "1.1.0-draft",
+  "contractVersion": "1.2.0-draft",
   "target": {
     "document_id": "0123456789abcdef01234567",
     "workspace_id": "89abcdef0123456789abcdef",
@@ -197,7 +197,8 @@
       "missingJournalDir": "goal_grant_file configured without dispatch_journal_dir: the server refuses to start with target_configuration_invalid",
       "readsGoal": "while valid/active.json or valid/stopped.json exists and is unexpired, GETs of /documents/d/{d}/w/{grant workspaceId}/currentmicroversion, /documents/d/{d}/w/{grant workspaceId}/elements and /partstudios/d/{d}/w/{grant workspaceId}/e/{e}/features are admitted",
       "reconciledBeyondJournal": "a grant with reconciledThrough greater than the highest journal sequence (e.g. valid/reconciled-through-1.json against an empty journal) yields goal_grant_invalid",
-      "journalSummary": "after twoChangesOneGoal, GET /goals/{goalId}/journal-summary returns entries 2, counted 2, maxSequence 2, unreconciledSequence null, lastOutcome OK"
+      "journalSummary": "after twoChangesOneGoal, GET /goals/{goalId}/journal-summary returns entries 2, counted 2, maxSequence 2, unreconciledSequence null, unreconciledEntry null, lastOutcome OK",
+      "journalSummaryUncertain": "after update-depth with valid/active.json ends in HTTP 503 (admittedAt 4102444600000), GET /goals/{goalId}/journal-summary equals goal-grant/journal-summary/uncertain.json with requestHash replaced by the computed value; with valid/reconciled-through-1.json, unreconciledSequence and unreconciledEntry are null"
     }
   },
   "capabilities": {
