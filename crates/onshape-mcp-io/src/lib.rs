@@ -6,6 +6,7 @@
 
 pub use openapi_mcp_io::api;
 pub mod config;
+mod dispatch_journal;
 mod external_token;
 pub mod login;
 pub mod oauth;
@@ -79,12 +80,14 @@ pub(crate) const REFRESH_MARGIN_SECS: i64 = 60;
 /// `OAuth` — Bearer token auth with refresh capability.
 /// `OAuthPending` — client creds present but awaiting tokens from auth flow.
 pub(crate) enum ApiState {
-    /// External-token mode: config, request timeout, and the per-process
-    /// replay record of admitted approvals (contract §2.5 step 8).
+    /// External-token mode: config, request timeout, the per-process
+    /// replay record of admitted approvals (contract §2.5 step 8), and the
+    /// dispatch target (always the fixed Onshape origin outside tests).
     ExternalToken(
         Box<onshape_mcp_core::config::ExternalTokenConfig>,
         Duration,
         onshape_mcp_core::approval::ConsumedProposals,
+        external_token::Provider,
     ),
     /// Credentials are not configured or are incomplete.
     NotConfigured {
@@ -911,8 +914,8 @@ async fn execute_raw_api_request(
         ApiState::NotConfigured { .. } | ApiState::OAuthPending(_) => {
             unreachable!("caller must check state before calling execute_raw_api_request")
         }
-        ApiState::ExternalToken(config, timeout, consumed) => {
-            external_token::execute(config, *timeout, consumed, api_req).await
+        ApiState::ExternalToken(config, timeout, consumed, provider) => {
+            external_token::execute(config, *timeout, consumed, provider, api_req).await
         }
         ApiState::Basic(client) => execute_basic_raw(client, api_req).await,
         // OAuth needs &mut ApiState for the potential state transition,
@@ -1619,6 +1622,7 @@ fn build_api_state(
             Box::new(external.clone()),
             config.api.timeout,
             onshape_mcp_core::approval::ConsumedProposals::default(),
+            external_token::Provider::Onshape,
         ));
     }
     if let Some(proxy_url) = config.auth.proxy_url.as_deref() {
@@ -3497,6 +3501,7 @@ mod tests {
             Box::new(config),
             Duration::from_secs(1),
             onshape_mcp_core::approval::ConsumedProposals::default(),
+            external_token::Provider::Onshape,
         );
         let initial_validation = ValidationState::default();
         let validation = tokio::sync::Mutex::new(initial_validation.clone());

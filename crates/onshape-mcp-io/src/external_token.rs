@@ -1,15 +1,22 @@
 //! External-token mode: no OAuth exchange, persistence, watcher, or retry.
-//! Exact-target GETs and approval-bound, revision-bound updates (contract §2.4, §2.5).
+//! Exact-target GETs, approval-bound and goal-bound, revision-bound updates
+//! (contract §2.4, §2.5, §12).
 use super::{McpError, OnshapeMcpServer, RawResponse};
+use crate::dispatch_journal::JournalStore;
 use chrono::{DateTime, Utc};
 use oauth2::AccessToken;
-use onshape_client_core::request::ApiRequest;
+use onshape_client_core::request::{ApiRequest, ApiResponse};
 use onshape_client_io::{ClientAuthConfig, ClientConfig, OnshapeClient};
 use onshape_mcp_core::approval::{
     APPROVAL_FILE_MAX_BYTES, ConsumedProposals, admit_mutation, claimed_read_workspace,
     read_admitted,
 };
 use onshape_mcp_core::config::{AppConfig, ExternalTokenConfig, ResolvedAuth};
+use onshape_mcp_core::goal::{
+    Capabilities, DispatchOutcome, GOAL_GRANT_FILE_MAX_BYTES, GoalAdmission, GoalDecision,
+    GoalGrant, GoalRejection, admit_goal_mutation, approval_active, goal_read_admitted,
+    grant_read_workspace, grant_still_active, is_uuid_v4,
+};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use std::{fs::OpenOptions, io::Read, time::Duration};
@@ -28,11 +35,27 @@ fn id(value: &str) -> bool {
             .bytes()
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
+/// Absolute and lexically canonical: no empty, `.` or `..` segments and no
+/// trailing slash. Checked on the raw bytes, because `Path` normalizes `.`
+/// away. Symlinks are rejected when the file or directory is opened.
+fn canonical_absolute(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    bytes.first() == Some(&b'/')
+        && bytes[1..]
+            .split(|&c| c == b'/')
+            .all(|segment| !matches!(segment, b"" | b"." | b".."))
+}
+
 pub fn validate_config(config: &ExternalTokenConfig) -> Result<(), &'static str> {
     if config
         .mutation_approval_file
         .as_ref()
         .is_some_and(|p| !p.is_absolute())
+        || [&config.goal_grant_file, &config.dispatch_journal_dir]
+            .into_iter()
+            .flatten()
+            .any(|p| !canonical_absolute(p))
         || config
             .read_api_version
             .as_deref()
@@ -47,6 +70,10 @@ pub fn validate_config(config: &ExternalTokenConfig) -> Result<(), &'static str>
     // Mandatory approval (contract §8.8): refuse to start without it.
     config
         .require_mutation_approval_file()
+        .map_err(|_| "target_configuration_invalid")?;
+    // Goal grants need the durable journal (contract §12.1).
+    config
+        .require_dispatch_journal_dir()
         .map_err(|_| "target_configuration_invalid")?;
     if let Some(policy) = &config.mutation {
         policy
@@ -140,34 +167,123 @@ fn allowed(config: &ExternalTokenConfig, request: &ApiRequest) -> bool {
     read_admitted(config, request, None)
 }
 
-/// §2.4 including the claimed Candidate of an active v2 approval. The
-/// approval file is read only if the fixed set denies the request; an absent,
-/// insecure, unreadable, `null`, v1 or expired approval adds nothing.
+/// §2.4 including the claimed Candidate of an active v2 approval, and §12.6
+/// the Candidate of an unexpired goal grant. The approval and grant files are
+/// read only if the fixed set denies the request; an absent, insecure,
+/// unreadable, `null`, invalid or expired file adds nothing.
 fn read_allowed(config: &ExternalTokenConfig, request: &ApiRequest, now_ms: i64) -> bool {
     if allowed(config, request) {
         return true;
     }
-    let Some(file) = &config.mutation_approval_file else {
+    if let Some(file) = &config.mutation_approval_file
+        && let Ok(approval) = private_json(file, APPROVAL_FILE_MAX_BYTES)
+        && claimed_read_workspace(config, &approval, now_ms)
+            .is_some_and(|workspace| read_admitted(config, request, Some(&workspace)))
+    {
+        return true;
+    }
+    let Some(file) = &config.goal_grant_file else {
         return false;
     };
-    let Ok(approval) = private_json(file, APPROVAL_FILE_MAX_BYTES) else {
+    let Ok(grant) = private_json(file, GOAL_GRANT_FILE_MAX_BYTES) else {
         return false;
     };
-    claimed_read_workspace(config, &approval, now_ms)
-        .is_some_and(|workspace| read_admitted(config, request, Some(&workspace)))
+    grant_read_workspace(config, &grant, now_ms)
+        .is_some_and(|workspace| goal_read_admitted(config, request, &workspace))
 }
 
-/// Admit and dispatch one request. Mutations follow contract §2.5 steps
-/// 1–10 in order; `consumed` is the per-process replay record.
+/// Where admitted requests go. Production always dispatches to the fixed
+/// Onshape origin; tests substitute a recording mock.
+#[derive(Clone, Default)]
+pub enum Provider {
+    /// Single-attempt client for `https://cad.onshape.com`.
+    #[default]
+    Onshape,
+    /// Recording test double; never part of a release build.
+    #[cfg(test)]
+    Mock(std::sync::Arc<mock::MockProvider>),
+}
+
+/// A connected provider for exactly one request.
+enum Dispatcher {
+    Onshape(OnshapeClient),
+    #[cfg(test)]
+    Mock(std::sync::Arc<mock::MockProvider>),
+}
+
+impl Provider {
+    fn connect(
+        &self,
+        base_url: &str,
+        access_token: &SecretString,
+        timeout: Duration,
+    ) -> Result<Dispatcher, ()> {
+        match self {
+            Self::Onshape => OnshapeClient::new_single_attempt(ClientConfig {
+                base_url: base_url.into(),
+                auth: ClientAuthConfig::Bearer {
+                    access_token: AccessToken::new(access_token.expose_secret().into()),
+                },
+                timeout: Some(timeout),
+            })
+            .map(Dispatcher::Onshape)
+            .map_err(|_| ()),
+            #[cfg(test)]
+            Self::Mock(mock) => {
+                mock.connected(base_url);
+                Ok(Dispatcher::Mock(std::sync::Arc::clone(mock)))
+            }
+        }
+    }
+}
+
+impl Dispatcher {
+    /// One attempt; `Err` for any transport failure.
+    async fn execute(&self, request: &ApiRequest) -> Result<ApiResponse, ()> {
+        match self {
+            Self::Onshape(client) => client.execute(request).await.map_err(|_| ()),
+            #[cfg(test)]
+            Self::Mock(mock) => mock.execute(request),
+        }
+    }
+}
+
+/// Fixed API base for a request.
+fn base_url(config: &ExternalTokenConfig, mutation: bool) -> &'static str {
+    if mutation || config.read_api_version.as_deref() == Some("v16") {
+        "https://cad.onshape.com/api/v16"
+    } else {
+        "https://cad.onshape.com/api/v10"
+    }
+}
+
+/// Serializes goal admissions process-wide from the grant read (§12.3 step 2)
+/// to the recorded outcome (step 11), so that two concurrent calls cannot both
+/// pass the journal checks of step 9.
+static GOAL_ADMISSION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Admit and dispatch one request. With `goal_grant_file`, mutations follow
+/// contract §12.3 and fall back to §2.5 only for a `null` grant; otherwise
+/// they follow §2.5 steps 1–10 in order. `consumed` is the per-process replay
+/// record of approvals.
 pub async fn execute(
     config: &ExternalTokenConfig,
     timeout: Duration,
     consumed: &mut ConsumedProposals,
+    provider: &Provider,
     request: &ApiRequest,
 ) -> Result<RawResponse, McpError> {
     validate_config(config).map_err(|code| McpError::invalid_request(code, None))?;
     let mutation = request.method != http::Method::GET;
     let now_ms = Utc::now().timestamp_millis();
+    if mutation && config.goal_grant_file.is_some() {
+        let _admission = GOAL_ADMISSION.lock().await;
+        if let GoalDecision::Admit(admission) =
+            admit_goal(config, request, now_ms).map_err(goal_error)?
+        {
+            return execute_goal(config, timeout, provider, request, &admission).await;
+        }
+    }
     let admitted = if mutation {
         // Steps 1–8; the approval file is read only after steps 1–2.
         let approval_file = config.mutation_approval_file.as_deref();
@@ -197,19 +313,9 @@ pub async fn execute(
         ));
     }
     // Fixed provider origin. Each dispatch reloads the atomically rotated file.
-    let client = OnshapeClient::new_single_attempt(ClientConfig {
-        base_url: if mutation || config.read_api_version.as_deref() == Some("v16") {
-            "https://cad.onshape.com/api/v16"
-        } else {
-            "https://cad.onshape.com/api/v10"
-        }
-        .into(),
-        auth: ClientAuthConfig::Bearer {
-            access_token: AccessToken::new(c.access_token.expose_secret().into()),
-        },
-        timeout: Some(timeout),
-    })
-    .map_err(|_| McpError::internal_error("external_token_client_unavailable", None))?;
+    let client = provider
+        .connect(base_url(config, mutation), &c.access_token, timeout)
+        .map_err(|()| McpError::internal_error("external_token_client_unavailable", None))?;
     // Step 10: consumed before the single dispatch attempt, whatever its outcome.
     if let Some(admitted) = admitted {
         consumed.record(admitted);
@@ -217,7 +323,7 @@ pub async fn execute(
     let response = client
         .execute(request)
         .await
-        .map_err(|_| dispatch_error(mutation))?;
+        .map_err(|()| dispatch_error(mutation))?;
     if mutation
         && (response.status.is_server_error()
             || response.status.is_redirection()
@@ -237,12 +343,232 @@ fn dispatch_error(mutation: bool) -> McpError {
     )
 }
 
+/// §12.3 steps 1–9. Files are read only when their step is reached.
+fn admit_goal(
+    config: &ExternalTokenConfig,
+    request: &ApiRequest,
+    now_ms: i64,
+) -> Result<GoalDecision, GoalRejection> {
+    let grant_file = config.goal_grant_file.as_deref();
+    let journal = config
+        .dispatch_journal_dir
+        .as_deref()
+        .map(JournalStore::new);
+    admit_goal_mutation(
+        config.mutation.as_ref(),
+        request,
+        || grant_file.and_then(|file| private_json(file, GOAL_GRANT_FILE_MAX_BYTES).ok()),
+        || {
+            config
+                .mutation_approval_file
+                .as_deref()
+                .and_then(|file| private_json(file, APPROVAL_FILE_MAX_BYTES).ok())
+                .is_some_and(|approval| approval_active(&approval, now_ms))
+        },
+        |goal_id| {
+            journal
+                .as_ref()
+                .ok_or(onshape_mcp_core::goal::GoalAdmissionError::JournalUnavailable)?
+                .read(goal_id)
+        },
+        now_ms,
+    )
+}
+
+fn goal_error(rejection: GoalRejection) -> McpError {
+    McpError::invalid_request(
+        rejection.error.code(),
+        rejection.data.map(|data| data.to_value()),
+    )
+}
+
+/// The unknown-outcome error (§6) with the goal data of §12.4 merged in.
+fn goal_unknown_outcome(admission: &GoalAdmission) -> McpError {
+    let mut data = admission.sequence_data().to_value();
+    if let Some(object) = data.as_object_mut() {
+        object.insert("outcome".into(), "UNKNOWN".into());
+        object.insert("retryAllowed".into(), false.into());
+        object.insert("reconciliationRequired".into(), true.into());
+    }
+    McpError::internal_error("mutation_outcome_unknown_reconcile_required", Some(data))
+}
+
+/// §12.3 steps 10–11 for an admitted goal request: token, `PENDING` (fsync),
+/// grant re-read, one dispatch, outcome (fsync). Never retries.
+async fn execute_goal(
+    config: &ExternalTokenConfig,
+    timeout: Duration,
+    provider: &Provider,
+    request: &ApiRequest,
+    admission: &GoalAdmission,
+) -> Result<RawResponse, McpError> {
+    let goal_id = admission.grant().goal_id.as_str();
+    let request_data = || Some(admission.request_data().to_value());
+    // Step 10.
+    let c = load(config).map_err(|code| McpError::invalid_request(code, request_data()))?;
+    if !c.scopes.iter().any(|scope| scope == "OAuth2Write") {
+        return Err(McpError::invalid_request(
+            "external_token_write_scope_missing",
+            request_data(),
+        ));
+    }
+    let client = provider
+        .connect(base_url(config, true), &c.access_token, timeout)
+        .map_err(|()| {
+            McpError::internal_error("external_token_client_unavailable", request_data())
+        })?;
+    // Step 11.
+    let (Some(grant_file), Some(journal_dir)) = (
+        config.goal_grant_file.as_deref(),
+        config.dispatch_journal_dir.as_deref(),
+    ) else {
+        return Err(McpError::invalid_request(
+            "target_configuration_invalid",
+            None,
+        ));
+    };
+    let journal = JournalStore::new(journal_dir);
+    let pending = admission.pending();
+    journal.append(goal_id, pending).map_err(|error| {
+        McpError::invalid_request(error.code(), Some(admission.sequence_data().to_value()))
+    })?;
+    // Test seam between the PENDING append and the grant re-read.
+    #[cfg(test)]
+    if let Provider::Mock(mock) = provider {
+        mock.before_recheck();
+    }
+    let still_active = private_json(grant_file, GOAL_GRANT_FILE_MAX_BYTES)
+        .is_ok_and(|grant| grant_still_active(&grant, goal_id, Utc::now().timestamp_millis()));
+    if !still_active {
+        // If this append fails, the PENDING line stays and blocks the goal as
+        // UNCERTAIN until reconciled: fail closed, no dispatch either way.
+        let _ = journal.append(
+            goal_id,
+            &pending.with_outcome(DispatchOutcome::NotDispatched, None),
+        );
+        return Err(McpError::invalid_request(
+            "goal_grant_stopped",
+            Some(admission.sequence_data().to_value()),
+        ));
+    }
+    let result = client.execute(request).await;
+    let (outcome, status) = match &result {
+        Ok(response) => {
+            let status = response.status.as_u16();
+            (DispatchOutcome::from_status(status), Some(status))
+        }
+        Err(()) => (DispatchOutcome::Uncertain, None),
+    };
+    let recorded = journal
+        .append(goal_id, &pending.with_outcome(outcome, status))
+        .is_ok();
+    match result {
+        // An unrecorded outcome leaves PENDING (= UNCERTAIN) in the journal,
+        // so the caller must reconcile whatever the provider answered.
+        Ok(response) if recorded && outcome != DispatchOutcome::Uncertain => {
+            Ok(super::raw_response_from_api_response(response))
+        }
+        _ => Err(goal_unknown_outcome(admission)),
+    }
+}
+
+/// `GET /capabilities` (§12.7). Local only; no provider I/O.
+fn capabilities(config: &ExternalTokenConfig) -> Capabilities {
+    let goal = config.goal_grant_file.is_some()
+        && config
+            .dispatch_journal_dir
+            .as_deref()
+            .is_some_and(|dir| JournalStore::new(dir).check_dir().is_ok());
+    Capabilities::new(config.mutation_approval_file.is_some(), goal)
+}
+
+/// `GET /goals/{goalId}/journal-summary` (§12.7). Local only; no provider I/O.
+///
+/// `404` for a non-uuid-v4 `goalId` or a server without goal configuration;
+/// `503` with `dispatch_journal_unavailable` for an unreadable journal.
+/// `unreconciledSequence` is computed against `reconciledThrough` of the
+/// current grant if it is structurally valid and names this goal, else 0.
+fn journal_summary(
+    config: &ExternalTokenConfig,
+    goal_id: &str,
+) -> (http::StatusCode, serde_json::Value) {
+    let (Some(grant_file), Some(journal_dir)) = (
+        config.goal_grant_file.as_deref(),
+        config.dispatch_journal_dir.as_deref(),
+    ) else {
+        return (http::StatusCode::NOT_FOUND, serde_json::Value::Null);
+    };
+    if !is_uuid_v4(goal_id) {
+        return (http::StatusCode::NOT_FOUND, serde_json::Value::Null);
+    }
+    let Ok(journal) = JournalStore::new(journal_dir).read(goal_id) else {
+        return (
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({"code": "dispatch_journal_unavailable"}),
+        );
+    };
+    let reconciled_through = private_json(grant_file, GOAL_GRANT_FILE_MAX_BYTES)
+        .ok()
+        .and_then(|value| GoalGrant::parse(&value).ok())
+        .filter(|grant| grant.goal_id == goal_id)
+        .map_or(0, |grant| grant.reconciled_through);
+    (
+        http::StatusCode::OK,
+        serde_json::to_value(journal.summary(goal_id, reconciled_through))
+            .unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// The local, unauthenticated routes of channel D and §12.7 (no provider I/O).
+fn local_routes(credential: ExternalTokenConfig) -> axum::Router {
+    use axum::{
+        Json, Router, extract::Path, http::StatusCode, response::IntoResponse, routing::get,
+    };
+    let ready = credential.clone();
+    let caps = credential.clone();
+    let summary = credential;
+    Router::new()
+        .route("/health", get(|| async { StatusCode::OK }))
+        .route(
+            "/health/ready",
+            get(move || {
+                let c = ready.clone();
+                async move {
+                    if load(&c).is_ok() {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    }
+                }
+            }),
+        )
+        .route(
+            "/capabilities",
+            get(move || {
+                let c = caps.clone();
+                async move { Json(capabilities(&c)) }
+            }),
+        )
+        .route(
+            "/goals/{goal_id}/journal-summary",
+            get(move |Path(goal_id): Path<String>| {
+                let c = summary.clone();
+                async move {
+                    let (status, body) = journal_summary(&c, &goal_id);
+                    if status == StatusCode::NOT_FOUND {
+                        return status.into_response();
+                    }
+                    (status, Json(body)).into_response()
+                }
+            }),
+        )
+}
+
 pub async fn run_http(
     name: &str,
     version: &str,
     config: AppConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use axum::{Router, http::StatusCode, routing::get};
     use rmcp::transport::streamable_http_server::{
         StreamableHttpService, session::local::LocalSessionManager,
     };
@@ -291,26 +617,96 @@ pub async fn run_http(
         Arc::new(LocalSessionManager::default()),
         transport_config,
     );
-    let app = Router::new()
-        .nest_service("/mcp", service)
-        .route("/health", get(|| async { StatusCode::OK }))
-        .route(
-            "/health/ready",
-            get(move || {
-                let c = credential.clone();
-                async move {
-                    if load(&c).is_ok() {
-                        StatusCode::OK
-                    } else {
-                        StatusCode::SERVICE_UNAVAILABLE
-                    }
-                }
-            }),
-        );
+    let app = local_routes(credential).nest_service("/mcp", service);
     let listener = tokio::net::TcpListener::bind((host.as_str(), port)).await?;
     super::serve_until_shutdown(listener, app, cancel).await?;
     Ok(())
 }
+
+/// Recording provider double for goal and approval dispatch tests.
+#[cfg(test)]
+// Test-only: a poisoned test mutex is a test bug.
+#[allow(clippy::unwrap_used)]
+pub mod mock {
+    use onshape_client_core::request::{ApiRequest, ApiResponse, ResponseBody};
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    /// Scripted provider answer for one dispatch.
+    #[derive(Clone, Copy, Debug)]
+    pub enum Reply {
+        /// An HTTP response with this status.
+        Status(u16),
+        /// A transport error (connection reset, timeout).
+        Transport,
+    }
+
+    type Hook = Box<dyn FnOnce() + Send>;
+
+    /// Records every connection and request; replies from a script. A call
+    /// without a scripted reply is recorded and fails as a transport error, so
+    /// tests that expect no provider I/O assert `calls().is_empty()`.
+    #[derive(Default)]
+    pub struct MockProvider {
+        replies: Mutex<VecDeque<Reply>>,
+        calls: Mutex<Vec<(String, String)>>,
+        connections: Mutex<Vec<String>>,
+        hook: Mutex<Option<Hook>>,
+    }
+
+    impl MockProvider {
+        pub fn new(replies: &[Reply]) -> std::sync::Arc<Self> {
+            let mock = Self::default();
+            mock.replies.lock().unwrap().extend(replies);
+            std::sync::Arc::new(mock)
+        }
+
+        /// Run `hook` once between the PENDING append and the grant re-read.
+        pub fn on_recheck(&self, hook: impl FnOnce() + Send + 'static) {
+            *self.hook.lock().unwrap() = Some(Box::new(hook));
+        }
+
+        /// `(method, path)` of every dispatched request.
+        pub fn calls(&self) -> Vec<(String, String)> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        /// Base URLs of every connection.
+        pub fn connections(&self) -> Vec<String> {
+            self.connections.lock().unwrap().clone()
+        }
+
+        pub fn connected(&self, base_url: &str) {
+            self.connections.lock().unwrap().push(base_url.to_owned());
+        }
+
+        pub fn before_recheck(&self) {
+            let hook = self.hook.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+
+        pub fn execute(&self, request: &ApiRequest) -> Result<ApiResponse, ()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((request.method.to_string(), request.path.clone()));
+            let reply = self.replies.lock().unwrap().pop_front();
+            match reply {
+                Some(Reply::Status(status)) => Ok(ApiResponse {
+                    status: http::StatusCode::from_u16(status).unwrap(),
+                    headers: http::HeaderMap::new(),
+                    body: ResponseBody::from("{}"),
+                }),
+                Some(Reply::Transport) | None => Err(()),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod goal_behaviour;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -395,6 +791,7 @@ mod tests {
             &c,
             Duration::from_secs(1),
             &mut ConsumedProposals::default(),
+            &Provider::Onshape,
             &r,
         )
         .await
@@ -524,7 +921,7 @@ mod tests {
         consumed: &mut ConsumedProposals,
         r: &ApiRequest,
     ) -> String {
-        execute(c, Duration::from_secs(1), consumed, r)
+        execute(c, Duration::from_secs(1), consumed, &Provider::Onshape, r)
             .await
             .err()
             .unwrap()
