@@ -78,7 +78,8 @@
     "confirmedAt": 4102444500000,
     "confirmedBy": {
       "kind": "dashboard-operator"
-    }
+    },
+    "nonce": null
   },
   "result": null,
   "capability": "AVAILABLE",
