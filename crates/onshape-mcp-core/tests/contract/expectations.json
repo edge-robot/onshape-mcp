@@ -1,5 +1,5 @@
 {
-  "contractVersion": "1.0.0-draft",
+  "contractVersion": "1.1.0-draft",
   "target": {
     "document_id": "0123456789abcdef01234567",
     "workspace_id": "89abcdef0123456789abcdef",
@@ -55,5 +55,158 @@
       "updatePartStudioFeature"
     ],
     "write_mode": "modify"
+  },
+  "boundsGoal": {
+    "_comment": "Static bounds plus goal configuration for goal-grant fixtures (§12.1). No approval v2 file is active unless a case says so.",
+    "document_id": "0123456789abcdef01234567",
+    "element_id": "fedcba9876543210fedcba98",
+    "excluded_workspace_ids": [
+      "eeeeeeeeeeeeeeeeeeeeeeee"
+    ],
+    "allowed_operations": [
+      "updatePartStudioFeature"
+    ],
+    "write_mode": "modify",
+    "goal_grant_file": "/run/onshape-approval/goal-grant.json",
+    "dispatch_journal_dir": "/var/lib/onshape-mcp/journal"
+  },
+  "goal-grant": {
+    "_comment": "Each case: grant fixture + request fixture (goal-grant/requests) + empty journal unless stated → expected code or 'admitted' (= reaches §12.3 step 11 and dispatches once). Order of §12.3 applies.",
+    "cases": [
+      {
+        "grant": "valid/active.json",
+        "request": "update-depth.request.json",
+        "expect": "admitted"
+      },
+      {
+        "grant": "valid/active.json",
+        "request": "update-fillet-radius.request.json",
+        "expect": "admitted"
+      },
+      {
+        "grant": "valid/stopped.json",
+        "request": "update-depth.request.json",
+        "expect": "goal_grant_stopped"
+      },
+      {
+        "grant": "valid/active.json",
+        "request": "feature-out-of-scope.request.json",
+        "expect": "goal_scope_denied"
+      },
+      {
+        "grant": "valid/active.json",
+        "request": "workspace-not-candidate.request.json",
+        "expect": "goal_scope_denied"
+      },
+      {
+        "grant": "valid/active.json",
+        "request": "primary-workspace.request.json",
+        "expect": "goal_scope_denied"
+      },
+      {
+        "grant": "valid/active.json",
+        "request": "body-feature-id-differs.request.json",
+        "expect": "goal_scope_denied"
+      },
+      {
+        "grant": "valid/active.json",
+        "request": "body-extra-key.request.json",
+        "expect": "goal_scope_denied"
+      },
+      {
+        "grant": "valid/active.json",
+        "request": "skew-flag-false.request.json",
+        "expect": "revision_policy_denied"
+      },
+      {
+        "grant": "invalid/expired.json",
+        "request": "update-depth.request.json",
+        "expect": "goal_grant_invalid"
+      },
+      {
+        "grant": "invalid/lifetime-over-8h.json",
+        "request": "update-depth.request.json",
+        "expect": "goal_grant_invalid"
+      },
+      {
+        "grant": "invalid/budget-over-25.json",
+        "request": "update-depth.request.json",
+        "expect": "goal_grant_invalid"
+      },
+      {
+        "grant": "invalid/budget-zero.json",
+        "request": "update-depth.request.json",
+        "expect": "goal_grant_invalid"
+      },
+      {
+        "grant": "invalid/unknown-field.json",
+        "request": "update-depth.request.json",
+        "expect": "goal_grant_invalid"
+      },
+      {
+        "grant": "invalid/missing-target.json",
+        "request": "update-depth.request.json",
+        "expect": "goal_grant_invalid"
+      },
+      {
+        "grant": "invalid/operation-add-feature.json",
+        "request": "update-depth.request.json",
+        "expect": "goal_grant_invalid"
+      },
+      {
+        "grant": "invalid/empty-feature-ids.json",
+        "request": "update-depth.request.json",
+        "expect": "goal_grant_invalid"
+      },
+      {
+        "grant": "invalid/duplicate-feature-ids.json",
+        "request": "update-depth.request.json",
+        "expect": "goal_grant_invalid"
+      },
+      {
+        "grant": "invalid/version-2.json",
+        "request": "update-depth.request.json",
+        "expect": "goal_grant_invalid"
+      },
+      {
+        "grant": "invalid/state-unknown.json",
+        "request": "update-depth.request.json",
+        "expect": "goal_grant_invalid"
+      },
+      {
+        "grant": "invalid/document-outside-bounds.json",
+        "request": "update-depth.request.json",
+        "expect": "target_policy_denied"
+      },
+      {
+        "grant": "invalid/workspace-excluded-primary.json",
+        "request": "primary-workspace.request.json",
+        "expect": "target_policy_denied"
+      }
+    ],
+    "behaviour": {
+      "twoChangesOneGoal": "with valid/active.json and an empty journal: update-depth (2xx) then update-fillet-radius (2xx) are both admitted; journal has sequences 1 and 2 with outcome OK; no second confirmation or grant revision is needed",
+      "budget": "with valid/active.json modified to maxDispatches 2 and journal entries 1 OK, 2 PROVIDER_REJECTED: the next request yields goal_budget_exhausted; an entry with outcome NOT_DISPATCHED does not count",
+      "duplicate": "after update-depth was dispatched with outcome OK, the identical request (same requestHash) yields goal_dispatch_duplicate with no provider I/O",
+      "uncertain": "a dispatch ending in transport error/timeout/5xx/3xx/408 yields mutation_outcome_unknown_reconcile_required with data {goalId, sequence, featureId, sourceMicroversion, admittedAt}; the next request yields goal_reconciliation_required until the grant has reconciledThrough >= that sequence (valid/reconciled-through-1.json unblocks sequence 1)",
+      "restart": "a journal whose last line for sequence 1 is PENDING is loaded after a restart as UNCERTAIN: the next request yields goal_reconciliation_required; the budget counts sequence 1",
+      "stopRace": "if the grant file changes to valid/stopped.json between §12.3 step 9 and step 11, the server records NOT_DISPATCHED for the new sequence, makes no provider call and returns goal_grant_stopped",
+      "authorityConflict": "with valid/active.json and approved-update/valid/update-feature-v2.json both present and unexpired, any mutation yields mutation_authority_conflict",
+      "nullGrantFallsBack": "with goal-grant.json = null, mutations follow §2.5 unchanged (approval v2 fixtures keep their results)",
+      "journalUnavailable": "a journal directory with group/other bits, a foreign owner or a corrupt line yields dispatch_journal_unavailable with no provider I/O",
+      "missingJournalDir": "goal_grant_file configured without dispatch_journal_dir: the server refuses to start with target_configuration_invalid",
+      "readsGoal": "while valid/active.json or valid/stopped.json exists and is unexpired, GETs of /documents/d/{d}/w/{grant workspaceId}/currentmicroversion, /documents/d/{d}/w/{grant workspaceId}/elements and /partstudios/d/{d}/w/{grant workspaceId}/e/{e}/features are admitted",
+      "reconciledBeyondJournal": "a grant with reconciledThrough greater than the highest journal sequence (e.g. valid/reconciled-through-1.json against an empty journal) yields goal_grant_invalid",
+      "journalSummary": "after twoChangesOneGoal, GET /goals/{goalId}/journal-summary returns entries 2, counted 2, maxSequence 2, unreconciledSequence null, lastOutcome OK"
+    }
+  },
+  "capabilities": {
+    "approval-v2-only.json": "server with mutation_approval_file only",
+    "approval-v2-and-goal.json": "server with mutation_approval_file, goal_grant_file and a valid dispatch_journal_dir",
+    "404": "pre-1.1.0 server; plugin reports goal path UNSUPPORTED"
+  },
+  "goal-workflow": {
+    "goal-hash/vector.json": "TS: goalHash(scope) equals goalHash and canonical(scope) equals canonical",
+    "goal-view/active.json": "TS: GoalView projection of an ACTIVE goal after two OK dispatches has exactly these keys and types (values volatile except structure)"
   }
 }

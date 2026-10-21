@@ -19,7 +19,16 @@
     "external_token_auth_owned_externally",
     "external_token_local_url_required",
     "external_token_local_url_invalid",
-    "external_token_validation_unavailable"
+    "external_token_validation_unavailable",
+    "goal_grant_unavailable",
+    "mutation_authority_conflict",
+    "goal_grant_invalid",
+    "goal_grant_stopped",
+    "goal_scope_denied",
+    "goal_budget_exhausted",
+    "goal_reconciliation_required",
+    "goal_dispatch_duplicate",
+    "dispatch_journal_unavailable"
   ],
   "plugin": [
     "mcp_execution_disabled",
@@ -39,7 +48,16 @@
     "invalid_arguments",
     "authorization_changed",
     "provider_protocol_error",
-    "proposal_body_invalid"
+    "proposal_body_invalid",
+    "goal_not_found",
+    "goal_active_conflict",
+    "goal_hash_mismatch",
+    "goal_confirmation_expired",
+    "goal_state_invalid",
+    "goal_candidate_mismatch",
+    "goal_verification_incomplete",
+    "goal_unsupported",
+    "goal_result_delivery_failed"
   ],
   "unknownOutcomeData": {
     "outcome": "UNKNOWN",
