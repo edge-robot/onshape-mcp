@@ -165,3 +165,65 @@ claims to the existing typed policy. No DID resolver, credential issuer, proof
 format or revocation service is introduced in this increment. Provider CAS and
 single-attempt dispatch do not constitute a durable exactly-once execution ledger;
 uncertain writes require control-plane reconciliation rather than automatic retry.
+
+## Goal grants (contract 1.1.0)
+
+A goal grant lets one human-confirmed goal admit several agent-authored
+`updatePartStudioFeature` calls in one Candidate workspace, within a scope and
+budget that this server enforces. The normative rules are in the interface
+contract, `clawonshape/docs/interface/onshape-mcp.md` §12 (grant schema, admission
+order, journal, STOP, reads, `/capabilities`); this section only describes the
+server configuration and behaviour.
+
+```toml
+[external_token]
+mutation_approval_file = "/run/onshape-approval/approved-update.json"
+goal_grant_file = "/run/onshape-approval/goal-grant.json"       # optional
+dispatch_journal_dir = "/var/lib/onshape-mcp/journal"          # required with goal_grant_file
+```
+
+| Key | Required | Rule |
+|---|---|---|
+| `goal_grant_file` | no | absolute, canonical; same private-file rules as the approval file, at most 64 KiB |
+| `dispatch_journal_dir` | yes, if `goal_grant_file` is set | absolute, canonical; otherwise the server refuses to start with `target_configuration_invalid`. Server-owned, rw, mode `0700`, persistent across restarts and upgrades; not shared with any other container |
+
+Authority selection on every mutation: a non-`null` grant together with an
+unexpired approval yields `mutation_authority_conflict`; a non-`null` grant
+selects goal admission; a `null` grant keeps the approval path above unchanged.
+A configured but missing or insecure grant file yields `goal_grant_unavailable`.
+
+Goal admission checks, in contract order and before any provider I/O: the static
+request shape, the grant (structure, expiry, 8 h lifetime, budget ≤ 25, state),
+the static bounds (including the optional expand-step pins), the grant scope
+(Candidate path, listed feature IDs, allowed body keys, ≤ 900 000 B canonical
+body), the revision fields, and the journal (reconciliation, duplicate
+`requestHash`, budget). Then the token is checked, a `PENDING` line is appended
+and fsynced, and the grant is re-read: if it is no longer `ACTIVE` for the same
+goal, the entry becomes `NOT_DISPATCHED` and the call fails with
+`goal_grant_stopped`. Otherwise the request is dispatched exactly once and the
+outcome is appended (`OK`, `PROVIDER_REJECTED`, or `UNCERTAIN` with the usual
+`UNKNOWN` error plus goal data). An outcome that cannot be recorded is reported
+as `UNKNOWN`; the remaining `PENDING` line blocks the goal like `UNCERTAIN`.
+
+The journal is `<dispatch_journal_dir>/<goalId>.jsonl`, append-only, never
+truncated by the server. It is the only server state; it makes budget, duplicate
+and uncertain-outcome blocking survive restarts. Goal admissions are serialized
+process-wide by one lock, held from the grant read to the recorded outcome. An
+unreadable, insecure or corrupt journal fails closed with
+`dispatch_journal_unavailable`.
+
+While an unexpired grant (`ACTIVE` or `STOPPED`) within the static bounds exists,
+GETs of `currentmicroversion`, `elements` and `features` of its Candidate are
+admitted in addition to the configured read set.
+
+Two unauthenticated local routes support the plugin; neither touches the
+provider:
+
+- `GET /capabilities` lists `approval-v2` when `mutation_approval_file` is set and
+  `goal-grant-v1` when the goal keys are set and the journal directory passes the
+  private checks.
+- `GET /goals/{goalId}/journal-summary` returns entries, counted entries,
+  highest sequence, the unreconciled sequence (against the current grant's
+  `reconciledThrough`), last outcome and admission time. A non-uuid-v4 `goalId`
+  or a server without goal keys yields `404`; an unreadable journal yields `503`
+  with `{"code":"dispatch_journal_unavailable"}`.
