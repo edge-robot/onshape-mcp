@@ -14,15 +14,15 @@ use onshape_mcp_core::approval::{
 };
 use onshape_mcp_core::config::{AppConfig, ExternalTokenConfig};
 use onshape_mcp_core::goal::{
-    Capabilities, GoalAdmissionError, GoalDecision, Journal, admit_goal_mutation, approval_active,
-    canonical_json, goal_read_admitted, grant_read_workspace, sha256_hex,
+    Capabilities, DispatchOutcome, GoalAdmissionError, GoalDecision, Journal, admit_goal_mutation,
+    approval_active, canonical_json, goal_read_admitted, grant_read_workspace, sha256_hex,
 };
 use onshape_mcp_core::target_policy::TargetConstraint;
 use onshape_mcp_core::tools::{EXTERNAL_TOKEN_TOOL_NAMES, list_tools_external_token};
 use serde_json::Value;
 
 /// Contract version this crate is implemented against.
-const CONTRACT_VERSION: &str = "1.1.0-draft";
+const CONTRACT_VERSION: &str = "1.2.0-draft";
 
 fn contract_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -773,6 +773,7 @@ fn goal_behaviour_entries_are_known() -> Result<(), String> {
             "budget",
             "duplicate",
             "journalSummary",
+            "journalSummaryUncertain",
             "journalUnavailable",
             "missingJournalDir",
             "nullGrantFallsBack",
@@ -784,6 +785,76 @@ fn goal_behaviour_entries_are_known() -> Result<(), String> {
             "uncertain",
         ]
     );
+    Ok(())
+}
+
+/// `journalSummaryUncertain` (1.2.0): the real admission at the fixture's
+/// `admittedAt`, an HTTP 503 outcome, and the summary against the fixture with
+/// the computed `requestHash`. The IO crate runs the same case through the
+/// route with the real clock.
+#[test]
+fn journal_summary_uncertain_matches_fixture() -> Result<(), String> {
+    let expectations = expectations()?;
+    assert!(
+        str_field(
+            &expectations,
+            "/goal-grant/behaviour/journalSummaryUncertain"
+        )?
+        .contains("goal-grant/journal-summary/uncertain.json")
+    );
+    let mut expected = read_contract_json("goal-grant/journal-summary/uncertain.json")?;
+    let admitted_at = expected
+        .pointer("/unreconciledEntry/admittedAt")
+        .and_then(Value::as_i64)
+        .ok_or("uncertain.json lacks unreconciledEntry.admittedAt")?;
+    let goal_id = str_field(&expected, "/goalId")?.to_owned();
+    let raw = read_contract_json("goal-grant/requests/update-depth.request.json")?;
+    let hashed = serde_json::json!({
+        "path": str_field(&raw, "/path")?,
+        "body": raw.get("body").ok_or("request lacks body")?,
+    });
+    let request_hash = sha256_hex(canonical_json(&hashed).as_bytes());
+    let slot = expected
+        .pointer_mut("/unreconciledEntry/requestHash")
+        .ok_or("uncertain.json lacks unreconciledEntry.requestHash")?;
+    *slot = Value::String(request_hash);
+
+    let policy = goal_bounds(&expectations)?;
+    let active = read_contract_json("goal-grant/valid/active.json")?;
+    let admission = match admit_goal_mutation(
+        Some(&policy),
+        &goal_request("update-depth.request.json")?,
+        || Some(active.clone()),
+        || false,
+        |_| Ok(Journal::default()),
+        admitted_at,
+    ) {
+        Ok(GoalDecision::Admit(admission)) => admission,
+        Ok(GoalDecision::ApprovalPath) => return Err("unexpected approval path".into()),
+        Err(rejection) => return Err(format!("rejected: {}", rejection.error.code())),
+    };
+    let pending = admission.pending();
+    let uncertain = pending.with_outcome(DispatchOutcome::from_status(503), Some(503));
+    let lines = format!(
+        "{}{}",
+        pending.to_line().map_err(|e| e.code().to_owned())?,
+        uncertain.to_line().map_err(|e| e.code().to_owned())?
+    );
+    let journal = Journal::parse(lines.as_bytes()).map_err(|e| e.code().to_owned())?;
+    let summary = |grant: &Value| -> Result<Value, String> {
+        let reconciled = grant
+            .get("reconciledThrough")
+            .and_then(Value::as_u64)
+            .ok_or("grant lacks reconciledThrough")?;
+        serde_json::to_value(journal.summary(&goal_id, reconciled)).map_err(|e| e.to_string())
+    };
+    assert_eq!(summary(&active)?, expected);
+    // Reconciled through sequence 1: nothing unreconciled any more.
+    let reconciled = read_contract_json("goal-grant/valid/reconciled-through-1.json")?;
+    let mut cleared = expected.clone();
+    cleared["unreconciledSequence"] = Value::Null;
+    cleared["unreconciledEntry"] = Value::Null;
+    assert_eq!(summary(&reconciled)?, cleared);
     Ok(())
 }
 
