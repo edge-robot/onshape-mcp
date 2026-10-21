@@ -18,7 +18,7 @@ use onshape_mcp_core::tools::{EXTERNAL_TOKEN_TOOL_NAMES, list_tools_external_tok
 use serde_json::Value;
 
 /// Contract version this crate is implemented against.
-const CONTRACT_VERSION: &str = "1.0.0-draft";
+const CONTRACT_VERSION: &str = "1.1.0-draft";
 
 fn contract_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
