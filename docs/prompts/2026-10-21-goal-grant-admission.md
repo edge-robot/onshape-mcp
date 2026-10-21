@@ -7,7 +7,7 @@ architecture-ref: clawonshape/docs/interface/onshape-mcp.md#12-goal-authorizatio
 contract-version: 1.1.0-draft
 foreign-repo-commit: f937771   # clawonshape, branch feat/18-goal-authorization (read-only mount)
 base-commit: c8beefe
-status: issued
+status: done
 ---
 # Goal grant admission with a durable dispatch journal (#5)
 
