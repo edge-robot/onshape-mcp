@@ -3489,6 +3489,8 @@ mod tests {
             element_id: "c".repeat(24),
             mutation: None,
             mutation_approval_file: None,
+            goal_grant_file: None,
+            dispatch_journal_dir: None,
             read_api_version: None,
         };
         let mut state = ApiState::ExternalToken(
