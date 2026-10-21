@@ -525,16 +525,16 @@ impl Journal {
     #[must_use]
     pub fn summary(&self, goal_id: &str, reconciled_through: u64) -> JournalSummary {
         let last = self.entries.last();
+        let unreconciled = self.unreconciled(reconciled_through);
         JournalSummary {
             goal_id: goal_id.to_owned(),
             entries: self.entries.len(),
             counted: self.counted(),
             max_sequence: self.max_sequence(),
-            unreconciled_sequence: self
-                .unreconciled(reconciled_through)
-                .map(|entry| entry.sequence),
+            unreconciled_sequence: unreconciled.map(|entry| entry.sequence),
             last_outcome: last.map(|entry| entry.outcome),
             last_admitted_at: last.map(|entry| entry.admitted_at),
+            unreconciled_entry: unreconciled.cloned(),
         }
     }
 }
@@ -557,6 +557,9 @@ pub struct JournalSummary {
     pub last_outcome: Option<DispatchOutcome>,
     /// Admission time of the highest sequence.
     pub last_admitted_at: Option<i64>,
+    /// The entry named by `unreconciled_sequence` (last line for that
+    /// sequence), contract 1.2.0. Carries no request body and no token.
+    pub unreconciled_entry: Option<JournalEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1424,13 +1427,19 @@ mod tests {
         assert_eq!(
             serde_json::to_value(j.summary(GOAL, 0)).unwrap(),
             json!({"goalId":GOAL,"entries":3,"counted":2,"maxSequence":3,
-                "unreconciledSequence":3,"lastOutcome":"PENDING","lastAdmittedAt":5})
+                "unreconciledSequence":3,"lastOutcome":"PENDING","lastAdmittedAt":5,
+                "unreconciledEntry":{"sequence":3,"grantRevision":1,"requestHash":h,
+                    "featureId":"f1","sourceMicroversion":"e".repeat(24),"admittedAt":5,
+                    "outcome":"PENDING","httpStatus":null}})
         );
-        assert_eq!(j.summary(GOAL, 3).unreconciled_sequence, None);
+        let reconciled = j.summary(GOAL, 3);
+        assert_eq!(reconciled.unreconciled_sequence, None);
+        assert_eq!(reconciled.unreconciled_entry, None);
         assert_eq!(
             serde_json::to_value(Journal::default().summary(GOAL, 0)).unwrap(),
             json!({"goalId":GOAL,"entries":0,"counted":0,"maxSequence":0,
-                "unreconciledSequence":null,"lastOutcome":null,"lastAdmittedAt":null})
+                "unreconciledSequence":null,"lastOutcome":null,"lastAdmittedAt":null,
+                "unreconciledEntry":null})
         );
     }
 

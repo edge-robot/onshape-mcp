@@ -312,7 +312,7 @@ async fn journal_summary() {
     assert_eq!(status, http::StatusCode::OK);
     assert!(body["lastAdmittedAt"].is_i64());
     let mut expected = json!({"goalId":GOAL,"entries":2,"counted":2,"maxSequence":2,
-        "unreconciledSequence":null,"lastOutcome":"OK"});
+        "unreconciledSequence":null,"lastOutcome":"OK","unreconciledEntry":null});
     expected["lastAdmittedAt"] = body["lastAdmittedAt"].clone();
     assert_eq!(body, expected);
     // Unknown goal: zeros and nulls.
@@ -322,7 +322,8 @@ async fn journal_summary() {
     assert_eq!(
         body,
         json!({"goalId":other,"entries":0,"counted":0,"maxSequence":0,
-            "unreconciledSequence":null,"lastOutcome":null,"lastAdmittedAt":null})
+            "unreconciledSequence":null,"lastOutcome":null,"lastAdmittedAt":null,
+            "unreconciledEntry":null})
     );
     // Not a uuid-v4.
     for bad in [
@@ -357,9 +358,48 @@ async fn journal_summary_follows_reconciliation() {
         .append(GOAL, &entry(1, &"1".repeat(64), DispatchOutcome::Uncertain))
         .unwrap();
     let uri = format!("/goals/{GOAL}/journal-summary");
-    assert_eq!(env.route(&uri).await.1["unreconciledSequence"], json!(1));
+    let before = env.route(&uri).await.1;
+    assert_eq!(before["unreconciledSequence"], json!(1));
+    assert_eq!(before["unreconciledEntry"]["sequence"], json!(1));
     env.grant("valid/reconciled-through-1.json");
-    assert_eq!(env.route(&uri).await.1["unreconciledSequence"], json!(null));
+    let after = env.route(&uri).await.1;
+    assert_eq!(after["unreconciledSequence"], json!(null));
+    assert_eq!(after["unreconciledEntry"], json!(null));
+}
+
+/// `journalSummaryUncertain` (1.2.0): `update-depth` ends in HTTP 503; the
+/// summary equals `journal-summary/uncertain.json` with the computed
+/// `requestHash`. The real clock sets `admittedAt`, so both time fields are
+/// taken from the journal; the core contract test checks the fixture value.
+#[tokio::test]
+async fn journal_summary_uncertain() {
+    let mut env = Env::new();
+    env.grant("valid/active.json");
+    let mock = MockProvider::new(&[Reply::Status(503)]);
+    assert_eq!(outcome(&env.call(&mock, &depth()).await), UNKNOWN);
+    assert_eq!(mock.calls().len(), 1);
+    let admitted_at = env.journal().entries()[0].admitted_at;
+    let mut expected = contract("goal-grant/journal-summary/uncertain.json");
+    expected["lastAdmittedAt"] = json!(admitted_at);
+    expected["unreconciledEntry"]["admittedAt"] = json!(admitted_at);
+    expected["unreconciledEntry"]["requestHash"] = json!(hash_of(&depth()));
+    let uri = format!("/goals/{GOAL}/journal-summary");
+    let (status, body) = env.route(&uri).await;
+    assert_eq!(status, http::StatusCode::OK);
+    assert_eq!(body, expected);
+    // Only the listed fields: no body, token or path leaks into the entry.
+    let text = body.to_string();
+    assert!(!text.contains("fake-test-token"));
+    assert!(!text.contains(&env.root.display().to_string()));
+    assert!(!text.contains("\"body\""));
+    // reconciled-through-1: both unreconciled fields are null.
+    env.grant("valid/reconciled-through-1.json");
+    let (_, body) = env.route(&uri).await;
+    expected["unreconciledSequence"] = json!(null);
+    expected["unreconciledEntry"] = json!(null);
+    assert_eq!(body, expected);
+    // The summary never reaches the provider.
+    assert_eq!(mock.calls().len(), 1);
 }
 
 /// A6: `/capabilities` matches both fixtures for the matching config.
@@ -541,6 +581,13 @@ async fn restart() {
     assert_eq!(summary["counted"], json!(1));
     assert_eq!(summary["unreconciledSequence"], json!(1));
     assert_eq!(summary["lastOutcome"], json!("PENDING"));
+    // The stored outcome is reported as is (1.2.0 `unreconciledEntry`).
+    assert_eq!(
+        summary["unreconciledEntry"],
+        serde_json::to_value(entry(1, &hash_of(&depth()), DispatchOutcome::Pending)).unwrap()
+    );
+    assert_eq!(summary["unreconciledEntry"]["outcome"], json!("PENDING"));
+    assert_eq!(summary["unreconciledEntry"]["httpStatus"], json!(null));
 }
 
 /// A7 via the real path: an outcome that cannot be recorded leaves `PENDING`,
