@@ -5,6 +5,7 @@
 
 pub mod approval;
 pub mod config;
+pub mod goal;
 pub mod target_policy;
 pub mod tools;
 

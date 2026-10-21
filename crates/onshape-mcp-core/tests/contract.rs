@@ -13,6 +13,10 @@ use onshape_mcp_core::approval::{
     AdmissionError, ConsumedProposals, admit_mutation, claimed_read_workspace, read_admitted,
 };
 use onshape_mcp_core::config::{AppConfig, ExternalTokenConfig};
+use onshape_mcp_core::goal::{
+    Capabilities, GoalAdmissionError, GoalDecision, Journal, admit_goal_mutation, approval_active,
+    canonical_json, goal_read_admitted, grant_read_workspace, sha256_hex,
+};
 use onshape_mcp_core::target_policy::TargetConstraint;
 use onshape_mcp_core::tools::{EXTERNAL_TOKEN_TOOL_NAMES, list_tools_external_token};
 use serde_json::Value;
@@ -617,6 +621,350 @@ fn admission_codes_are_listed_in_contract() -> Result<(), String> {
         .filter_map(Value::as_str)
         .collect();
     for error in AdmissionError::ALL {
+        assert!(
+            server.contains(&error.code()),
+            "{} not in contract",
+            error.code()
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Goal authorization (§12, 1.1.0)
+// ---------------------------------------------------------------------------
+
+/// `boundsGoal` without the `_comment` and the §12.1 file keys, as the static
+/// `[external_token.mutation]` bounds.
+fn goal_bounds(expectations: &Value) -> Result<TargetConstraint, String> {
+    let mut bounds = expectations
+        .get("boundsGoal")
+        .cloned()
+        .ok_or("expectations.json lacks boundsGoal")?;
+    let object = bounds
+        .as_object_mut()
+        .ok_or("boundsGoal is not an object")?;
+    for key in ["_comment", "goal_grant_file", "dispatch_journal_dir"] {
+        object.remove(key);
+    }
+    serde_json::from_value(bounds).map_err(|e| format!("boundsGoal is not a TargetConstraint: {e}"))
+}
+
+/// A `goal-grant/requests/*.request.json` fixture as an `ApiRequest`.
+fn goal_request(name: &str) -> Result<ApiRequest, String> {
+    let raw = read_contract_json(&format!("goal-grant/requests/{name}"))?;
+    let method = str_field(&raw, "/method")?;
+    let query = raw
+        .get("query_params")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{name} lacks query_params"))?;
+    if !query.is_empty() {
+        return Err(format!("{name} unexpectedly has query parameters"));
+    }
+    Ok(ApiRequest {
+        method: method
+            .parse()
+            .map_err(|e| format!("bad method {method}: {e}"))?,
+        path: str_field(&raw, "/path")?.to_owned(),
+        query_params: vec![],
+        headers: http::HeaderMap::new(),
+        body: Some(RequestBody::Json(
+            raw.get("body")
+                .cloned()
+                .ok_or_else(|| format!("{name} lacks body"))?,
+        )),
+        content_type: Some("application/json".into()),
+    })
+}
+
+/// Run the real goal admission (§12.3 steps 1–9) against an empty journal and
+/// no active approval; map the result to the `expectations.json` vocabulary.
+fn goal_result(
+    policy: &TargetConstraint,
+    request: &ApiRequest,
+    grant: &Value,
+    journal: &Journal,
+) -> String {
+    match admit_goal_mutation(
+        Some(policy),
+        request,
+        || Some(grant.clone()),
+        || false,
+        |_| Ok(journal.clone()),
+        now_ms(),
+    ) {
+        Ok(GoalDecision::Admit(_)) => "admitted".to_owned(),
+        Ok(GoalDecision::ApprovalPath) => "approval-path".to_owned(),
+        Err(rejection) => rejection.error.code().to_owned(),
+    }
+}
+
+fn goal_cases(expectations: &Value) -> Result<Vec<(String, String, String)>, String> {
+    let cases = expectations
+        .pointer("/goal-grant/cases")
+        .and_then(Value::as_array)
+        .ok_or("expectations.json lacks goal-grant.cases")?;
+    cases
+        .iter()
+        .map(|case| {
+            Ok((
+                str_field(case, "/grant")?.to_owned(),
+                str_field(case, "/request")?.to_owned(),
+                str_field(case, "/expect")?.to_owned(),
+            ))
+        })
+        .collect()
+}
+
+#[test]
+fn goal_grant_cases_follow_admission_order() -> Result<(), String> {
+    let expectations = expectations()?;
+    let policy = goal_bounds(&expectations)?;
+    let cases = goal_cases(&expectations)?;
+    assert_eq!(cases.len(), 22, "goal-grant.cases count");
+    for (grant, request, expected) in cases {
+        let fixture = read_contract_json(&format!("goal-grant/{grant}"))?;
+        let actual = goal_result(
+            &policy,
+            &goal_request(&request)?,
+            &fixture,
+            &Journal::default(),
+        );
+        assert_eq!(actual, expected, "{grant} + {request}");
+    }
+    Ok(())
+}
+
+#[test]
+fn every_goal_fixture_is_used_by_a_case() -> Result<(), String> {
+    let expectations = expectations()?;
+    let cases = goal_cases(&expectations)?;
+    for kind in ["valid", "invalid", "requests"] {
+        let dir = contract_path(&format!("goal-grant/{kind}"));
+        let entries =
+            std::fs::read_dir(&dir).map_err(|e| format!("cannot list {}: {e}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let file = entry.file_name().to_string_lossy().into_owned();
+            let used = cases.iter().any(|(grant, request, _)| {
+                grant == &format!("{kind}/{file}") || (kind == "requests" && request == &file)
+            }) || (kind == "valid" && file == "reconciled-through-1.json");
+            assert!(used, "goal-grant/{kind}/{file} is not exercised");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn goal_behaviour_entries_are_known() -> Result<(), String> {
+    let expectations = expectations()?;
+    let behaviour = expectations
+        .pointer("/goal-grant/behaviour")
+        .and_then(Value::as_object)
+        .ok_or("expectations.json lacks goal-grant.behaviour")?;
+    let mut keys: Vec<&str> = behaviour.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    // Each key has a named test in onshape-mcp-io `goal_behaviour`; a new key
+    // needs a new test there.
+    assert_eq!(
+        keys,
+        [
+            "authorityConflict",
+            "budget",
+            "duplicate",
+            "journalSummary",
+            "journalUnavailable",
+            "missingJournalDir",
+            "nullGrantFallsBack",
+            "readsGoal",
+            "reconciledBeyondJournal",
+            "restart",
+            "stopRace",
+            "twoChangesOneGoal",
+            "uncertain",
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn goal_reconciled_beyond_journal_is_invalid() -> Result<(), String> {
+    let expectations = expectations()?;
+    assert!(
+        str_field(
+            &expectations,
+            "/goal-grant/behaviour/reconciledBeyondJournal"
+        )?
+        .contains("goal_grant_invalid")
+    );
+    let grant = read_contract_json("goal-grant/valid/reconciled-through-1.json")?;
+    let request = goal_request("update-depth.request.json")?;
+    let policy = goal_bounds(&expectations)?;
+    assert_eq!(
+        goal_result(&policy, &request, &grant, &Journal::default()),
+        "goal_grant_invalid"
+    );
+    Ok(())
+}
+
+#[test]
+fn goal_authority_conflict_and_null_fallback() -> Result<(), String> {
+    let expectations = expectations()?;
+    let policy = goal_bounds(&expectations)?;
+    let request = goal_request("update-depth.request.json")?;
+    let grant = read_contract_json("goal-grant/valid/active.json")?;
+    let approval = read_contract_json("approved-update/valid/update-feature-v2.json")?;
+    assert!(approval_active(&approval, now_ms()));
+    let conflict = admit_goal_mutation(
+        Some(&policy),
+        &request,
+        || Some(grant.clone()),
+        || approval_active(&approval, now_ms()),
+        |_| Ok(Journal::default()),
+        now_ms(),
+    );
+    assert_eq!(
+        conflict.err().map(|r| r.error.code()),
+        Some("mutation_authority_conflict")
+    );
+    // Expired or `null` approvals are no authority.
+    for name in ["invalid/v2-expired.json", "invalid/null-no-approval.json"] {
+        let fixture = read_contract_json(&format!("approved-update/{name}"))?;
+        assert!(!approval_active(&fixture, now_ms()), "{name}");
+    }
+    assert_eq!(
+        goal_result(&policy, &request, &Value::Null, &Journal::default()),
+        "approval-path"
+    );
+    Ok(())
+}
+
+#[test]
+fn missing_journal_dir_refuses_start() -> Result<(), String> {
+    let expectations = expectations()?;
+    assert!(
+        str_field(&expectations, "/goal-grant/behaviour/missingJournalDir")?
+            .contains("target_configuration_invalid")
+    );
+    let grant_file = str_field(&expectations, "/boundsGoal/goal_grant_file")?;
+    let journal_dir = str_field(&expectations, "/boundsGoal/dispatch_journal_dir")?;
+    let base = r#"[external_token]
+file = "/run/onshape-credentials/access-token.json"
+document_id = "0123456789abcdef01234567"
+workspace_id = "eeeeeeeeeeeeeeeeeeeeeeee"
+element_id = "fedcba9876543210fedcba98"
+mutation_approval_file = "/run/onshape-approval/approved-update.json"
+"#;
+    let without = external_token(&format!("{base}goal_grant_file = \"{grant_file}\"\n"))?;
+    assert_eq!(
+        without
+            .require_dispatch_journal_dir()
+            .map_err(|e| e.to_string()),
+        Err("target_configuration_invalid".to_owned())
+    );
+    let with = external_token(&format!(
+        "{base}goal_grant_file = \"{grant_file}\"\ndispatch_journal_dir = \"{journal_dir}\"\n"
+    ))?;
+    assert_eq!(with.require_dispatch_journal_dir(), Ok(()));
+    assert_eq!(external_token(base)?.require_dispatch_journal_dir(), Ok(()));
+    Ok(())
+}
+
+#[test]
+fn reads_of_goal_candidate_while_grant_exists() -> Result<(), String> {
+    let expectations = expectations()?;
+    let mut config = reads_config(&expectations)?;
+    config.mutation = Some(goal_bounds(&expectations)?);
+    let d = config.document_id.clone();
+    let e = config.element_id.clone();
+    for name in ["valid/active.json", "valid/stopped.json"] {
+        let grant = read_contract_json(&format!("goal-grant/{name}"))?;
+        let w = str_field(&grant, "/target/workspaceId")?.to_owned();
+        let workspace =
+            grant_read_workspace(&config, &grant, now_ms()).ok_or("grant must yield reads")?;
+        for path in [
+            format!("/documents/d/{d}/w/{w}/currentmicroversion"),
+            format!("/documents/d/{d}/w/{w}/elements"),
+            format!("/partstudios/d/{d}/w/{w}/e/{e}/features"),
+        ] {
+            assert!(!read_admitted(&config, &get(path.clone()), None), "{path}");
+            assert!(
+                goal_read_admitted(&config, &get(path.clone()), &workspace),
+                "{name}: {path}"
+            );
+        }
+        for path in [
+            format!("/documents/d/{d}/w/{w}/workspaces"),
+            format!("/partstudios/d/{d}/w/{w}/e/{e}/features/featureid/FabcDEF123_0"),
+            format!("/partstudios/d/{}/w/{w}/e/{e}/features", "1".repeat(24)),
+        ] {
+            assert!(
+                !goal_read_admitted(&config, &get(path.clone()), &workspace),
+                "{path}"
+            );
+        }
+        // Expired grants add nothing.
+        let expires_at = grant
+            .get("expiresAt")
+            .and_then(Value::as_i64)
+            .ok_or("no expiresAt")?;
+        assert_eq!(grant_read_workspace(&config, &grant, expires_at), None);
+    }
+    for name in [
+        "invalid/expired.json",
+        "invalid/document-outside-bounds.json",
+        "invalid/workspace-excluded-primary.json",
+        "invalid/unknown-field.json",
+    ] {
+        let grant = read_contract_json(&format!("goal-grant/{name}"))?;
+        assert_eq!(
+            grant_read_workspace(&config, &grant, now_ms()),
+            None,
+            "{name}"
+        );
+    }
+    assert_eq!(grant_read_workspace(&config, &Value::Null, now_ms()), None);
+    Ok(())
+}
+
+#[test]
+fn capabilities_match_fixtures() -> Result<(), String> {
+    for (name, goal) in [
+        ("approval-v2-only.json", false),
+        ("approval-v2-and-goal.json", true),
+    ] {
+        let fixture = read_contract_json(&format!("capabilities/{name}"))?;
+        let actual =
+            serde_json::to_value(Capabilities::new(true, goal)).map_err(|e| e.to_string())?;
+        assert_eq!(actual, fixture, "{name}");
+    }
+    Ok(())
+}
+
+#[test]
+fn canonical_json_matches_goal_hash_vector() -> Result<(), String> {
+    let vector = read_contract_json("goal-workflow/goal-hash/vector.json")?;
+    let scope = vector.get("scope").ok_or("vector lacks scope")?;
+    let canonical = str_field(&vector, "/canonical")?;
+    assert_eq!(canonical_json(scope), canonical);
+    assert_eq!(
+        sha256_hex(canonical.as_bytes()),
+        str_field(&vector, "/goalHash")?
+    );
+    Ok(())
+}
+
+#[test]
+fn goal_codes_are_listed_in_contract() -> Result<(), String> {
+    let codes = read_contract_json("error-codes.json")?;
+    let server: Vec<&str> = codes
+        .get("server")
+        .and_then(Value::as_array)
+        .ok_or("error-codes.json lacks server")?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    for error in GoalAdmissionError::ALL {
         assert!(
             server.contains(&error.code()),
             "{} not in contract",
