@@ -7,7 +7,7 @@ architecture-ref: clawonshape/docs/interface/onshape-mcp.md#127-capability-repor
 contract-version: 1.2.0-draft
 foreign-repo-commit: 68dfbc6   # clawonshape, branch feat/18-goal-authorization (read-only mount)
 base-commit: 162e2c5
-status: issued
+status: done
 ---
 # Journal summary returns the unreconciled entry (contract 1.2.0-draft)
 
