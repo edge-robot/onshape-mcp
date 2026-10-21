@@ -227,3 +227,5 @@ provider:
   `reconciledThrough`), last outcome and admission time. A non-uuid-v4 `goalId`
   or a server without goal keys yields `404`; an unreadable journal yields `503`
   with `{"code":"dispatch_journal_unavailable"}`.
+  Since contract 1.2.0 it also returns `unreconciledEntry`, the journal entry
+  named by the unreconciled sequence (or `null`), without bodies or tokens.

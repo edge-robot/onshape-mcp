@@ -32,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `goal_grant_stopped`, `goal_scope_denied`, `goal_budget_exhausted`,
   `goal_reconciliation_required`, `goal_dispatch_duplicate`,
   `dispatch_journal_unavailable`
+- Journal summary `unreconciledEntry` (contract 1.2.0-draft §12.7): the
+  unreconciled journal entry, so that callers can reconcile without the
+  original MCP error data
 - Initial project documentation structure
 - Generic API tools (`onshape_api_search`, `onshape_api_explain`, `onshape_api_call`) powered by embedded Onshape OpenAPI specification
 - OpenAPI spec parsing module (`openapi.rs`) with search, explain, and request building
