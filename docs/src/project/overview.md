@@ -1,5 +1,9 @@
 # Project Overview
 
+> Supplementary technical architecture reference. [Root spec.md](../../../spec.md) is the sole normative
+> product requirements source, including platform and standalone obligations.
+> This reference cannot redefine product scope or establish current runtime availability.
+
 This project is a Rust-based MCP (Model Context Protocol) server for Onshape. The main purpose is to let an AI assistant discover, inspect, and execute Onshape API operations in a controlled and structured way.
 
 The recommended transport is local stdio. Experimental Streamable HTTP is also available for self-hosted setups, but no public hosted service is provided.

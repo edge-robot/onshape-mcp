@@ -1,10 +1,19 @@
 # Onshape MCP
 
+**[spec.md](spec.md) is the sole normative product requirements source.**
+It covers generic standalone use and the restricted ClawOnshape integration.
+This README provides installation/operating guidance and historical context.
+
 AI-assisted access to your Onshape CAD documents.
 
-## Claw-Onshape local fork — changes (2026-10-12)
+## Historical Claw-Onshape fork snapshot (2026-10-12)
 
-This working fork is checked out at
+The following preserved snapshot describes the fork as observed on 2026-10-12.
+Its branch, code inventory, test results and acceptance limits are historical;
+they are not claims about the current checkout or runtime. Current intended
+behavior is defined in [spec.md](spec.md).
+
+At that time the fork was checked out at
 `/home/kaos/Projects/01_pib/02_sw/onshape-mcp`, on branch
 `claw-onshape/external-token`, based on upstream commit
 [`f78ddc48a445765f32fcf052d9d8e6d709497d56`](https://github.com/altendky/onshape-mcp/tree/f78ddc48a445765f32fcf052d9d8e6d709497d56)
