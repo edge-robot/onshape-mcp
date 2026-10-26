@@ -7,7 +7,7 @@ architecture-ref: clawonshape/docs/interface/onshape-mcp.md#9-versioning-and-com
 contract-version: 1.2.0-draft
 foreign-repo-commit: the clawonshape HEAD of feat/21-work-context-selection at issue time (read-only mount)
 base-commit: the commit that adds this prompt
-status: issued
+status: done   # accepted 2026-10-26 (report ec121b7); #6 fixed 1226c6b; tokio advisory → #10; handoff links retargeted to the default branch
 ---
 # Closure K3: server handoff on feat/5-goal-grant
 
