@@ -1,7 +1,7 @@
 ---
 target-repo: edge-robot/onshape-mcp
 branch: claw-onshape/external-token
-worktree: /home/kaos/Projects/01_pib/02_sw/onshape-mcp (container: /workspaces/onshape-mcp)
+worktree: <workspace>/onshape-mcp (container: /workspaces/onshape-mcp)
 issue: edge-robot/onshape-mcp#3
 architecture-ref: clawonshape/docs/interface/onshape-mcp.md#8-security-invariants
 contract-version: 0.2.0-draft

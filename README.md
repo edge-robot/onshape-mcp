@@ -14,7 +14,7 @@ they are not claims about the current checkout or runtime. Current intended
 behavior is defined in [spec.md](spec.md).
 
 At that time the fork was checked out at
-`/home/kaos/Projects/01_pib/02_sw/onshape-mcp`, on branch
+`<workspace>/onshape-mcp`, on branch
 `claw-onshape/external-token`, based on upstream commit
 [`f78ddc48a445765f32fcf052d9d8e6d709497d56`](https://github.com/altendky/onshape-mcp/tree/f78ddc48a445765f32fcf052d9d8e6d709497d56)
 (workspace version `0.5.3-dev.0`; MIT OR Apache-2.0). The `origin` remote still

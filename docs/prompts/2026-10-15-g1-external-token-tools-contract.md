@@ -1,7 +1,7 @@
 ---
 target-repo: edge-robot/onshape-mcp
 branch: claw-onshape/external-token
-worktree: /home/kaos/Projects/01_pib/02_sw/onshape-mcp (container: /workspaces/onshape-mcp)
+worktree: <workspace>/onshape-mcp (container: /workspaces/onshape-mcp)
 issue: edge-robot/onshape-mcp#1
 architecture-ref: clawonshape/docs/interface/onshape-mcp.md#23-tools-external-token-mode
 contract-version: 0.2.0-draft
@@ -133,7 +133,7 @@ Make the external-token `tools/list` catalog a tested contract artifact:
 ## Branch and worktree rules
 
 - Work and commit only on `claw-onshape/external-token` in `/workspaces/onshape-mcp`
-  (host: `/home/kaos/Projects/01_pib/02_sw/onshape-mcp`). Do not create branches or
+  (host: `<workspace>/onshape-mcp`). Do not create branches or
   worktrees, do not switch branches, and never push.
 - The worktree is returned when the report is committed and `git status --short` is
   clean. The architect reviews and pushes.

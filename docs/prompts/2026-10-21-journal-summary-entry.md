@@ -1,7 +1,7 @@
 ---
 target-repo: edge-robot/onshape-mcp
 branch: feat/5-goal-grant
-worktree: /home/kaos/Projects/01_pib/02_sw/onshape-mcp (container: /workspaces/onshape-mcp)
+worktree: <workspace>/onshape-mcp (container: /workspaces/onshape-mcp)
 issue: edge-robot/onshape-mcp#5
 architecture-ref: clawonshape/docs/interface/onshape-mcp.md#127-capability-reporting
 contract-version: 1.2.0-draft

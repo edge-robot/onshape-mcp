@@ -1,7 +1,7 @@
 ---
 target-repo: edge-robot/onshape-mcp
 branch: claw-onshape/external-token
-worktree: /home/kaos/Projects/01_pib/02_sw/onshape-mcp (container: /workspaces/onshape-mcp)
+worktree: <workspace>/onshape-mcp (container: /workspaces/onshape-mcp)
 issue: edge-robot/onshape-mcp#2
 architecture-ref: clawonshape/docs/interface/onshape-mcp.md#25-mutation-admission-onshape_api_call-method-other-than-get
 contract-version: 1.0.0-draft
