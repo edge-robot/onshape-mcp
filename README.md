@@ -60,8 +60,8 @@ Code changes are limited to
 `crates/onshape-mcp-core/src/config.rs`,
 `crates/onshape-mcp-io/src/{config.rs,external_token.rs,lib.rs,request.rs}`,
 and `crates/onshape-mcp/src/main.rs`.
-The reproducible code-only patch is maintained at
-[`../clawonshape/deploy/onshape-mcp/patches/0001-external-token-readonly.patch`](../clawonshape/deploy/onshape-mcp/patches/0001-external-token-readonly.patch).
+The reproducible code-only patch is maintained in the ClawOnshape repo checkout at
+`<workspace>/clawonshape/deploy/onshape-mcp/patches/0001-external-token-readonly.patch` (not part of this repository).
 Clawake lifecycle and Claw-Onshape credential publication remain in their own
 repositories. No build cache, live configuration or credentials are copied here.
 
