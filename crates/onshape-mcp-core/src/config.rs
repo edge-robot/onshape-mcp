@@ -156,6 +156,9 @@ pub struct AllowedUser {
 /// Top-level application configuration.
 #[derive(Default, Deserialize)]
 pub struct AppConfig {
+    /// Externally owned credentials. This mode never logs in or refreshes.
+    #[serde(default)]
+    pub external_token: Option<ExternalTokenConfig>,
     /// Authentication settings.
     #[serde(default)]
     pub auth: AuthConfig,
@@ -165,6 +168,68 @@ pub struct AppConfig {
     /// HTTP transport settings (for `onshape-mcp http` subcommand).
     #[serde(default)]
     pub http: HttpTransportConfig,
+}
+
+/// External-token mode; target binding is mandatory and writes default to denied.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalTokenConfig {
+    pub file: std::path::PathBuf,
+    pub document_id: String,
+    pub workspace_id: String,
+    pub element_id: String,
+    /// Optional, operator-provisioned bounded mutation authority.
+    #[serde(default)]
+    pub mutation: Option<crate::target_policy::TargetConstraint>,
+    /// Private approval file published by the approval owner (contract §4).
+    /// Mandatory whenever `mutation` is configured; see
+    /// [`Self::require_mutation_approval_file`].
+    #[serde(default)]
+    pub mutation_approval_file: Option<std::path::PathBuf>,
+    /// Private goal grant file published by the goal owner (contract §12.2).
+    /// Optional; requires [`Self::dispatch_journal_dir`], see
+    /// [`Self::require_dispatch_journal_dir`].
+    #[serde(default)]
+    pub goal_grant_file: Option<std::path::PathBuf>,
+    /// Server-owned, private, rw directory of the durable dispatch journal
+    /// (contract §12.1, §12.4). Required whenever `goal_grant_file` is set.
+    #[serde(default)]
+    pub dispatch_journal_dir: Option<std::path::PathBuf>,
+    /// Native feature reads may use v16 to prepare compatible update payloads.
+    #[serde(default)]
+    pub read_api_version: Option<String>,
+}
+
+impl ExternalTokenConfig {
+    /// Contract §2.5 step 3 and §8.8: a server with `[external_token.mutation]`
+    /// must also have `mutation_approval_file`, otherwise it does not start.
+    ///
+    /// # Errors
+    /// [`PolicyError::InvalidConfiguration`](crate::target_policy::PolicyError)
+    /// (`target_configuration_invalid`) if mutation bounds lack an approval file.
+    pub const fn require_mutation_approval_file(
+        &self,
+    ) -> Result<(), crate::target_policy::PolicyError> {
+        if self.mutation.is_some() && self.mutation_approval_file.is_none() {
+            return Err(crate::target_policy::PolicyError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+
+    /// Contract §12.1: a server with `goal_grant_file` must also have
+    /// `dispatch_journal_dir`, otherwise it does not start.
+    ///
+    /// # Errors
+    /// [`PolicyError::InvalidConfiguration`](crate::target_policy::PolicyError)
+    /// (`target_configuration_invalid`) if a goal grant file lacks a journal directory.
+    pub const fn require_dispatch_journal_dir(
+        &self,
+    ) -> Result<(), crate::target_policy::PolicyError> {
+        if self.goal_grant_file.is_some() && self.dispatch_journal_dir.is_none() {
+            return Err(crate::target_policy::PolicyError::InvalidConfiguration);
+        }
+        Ok(())
+    }
 }
 
 // ============================================================================

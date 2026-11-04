@@ -1,0 +1,7 @@
+{
+  "contractVersion": "1.1.0",
+  "mutationAuthorities": [
+    "approval-v2",
+    "goal-grant-v1"
+  ]
+}

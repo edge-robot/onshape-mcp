@@ -1,5 +1,9 @@
 # Onshape MCP
 
+> Technical documentation index. [Root spec.md](../../../spec.md) is the sole normative
+> product requirements source, including platform and standalone obligations.
+> This reference cannot redefine product scope or establish current runtime availability.
+
 A Rust-based MCP (Model Context Protocol) server for Onshape integration. Local
 stdio is the recommended and primary mode. Experimental Streamable HTTP remains
 available for self-hosting, but the project provides no public hosted MCP server
@@ -8,6 +12,8 @@ or public OAuth proxy.
 ## Documentation
 
 ### Core Design
+
+- [Project Overview](overview.md) — Rust, Node wrapper and Sans-IO request flow
 
 - [Principles](principles.md) — Sans-IO philosophy, testability goals, dependencies policy
 - [Architecture](architecture.md) — Layer design, crate structure, workspace layout

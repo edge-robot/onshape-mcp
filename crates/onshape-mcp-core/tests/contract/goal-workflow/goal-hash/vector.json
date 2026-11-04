@@ -1,0 +1,74 @@
+{
+  "_comment": "goal-workflow.md §2: goalHash = sha256(canonical JSON of scope); canonical = sorted keys, separators , and :, UTF-8, no ASCII escaping",
+  "scope": {
+    "version": 1,
+    "goalText": "Stiffen the camera mount: 60 mm extrude depth and 2 mm edge fillet, keep the mounting holes.",
+    "goalConditions": [
+      {
+        "id": "depth",
+        "kind": "parameterEquals",
+        "featureId": "FabcDEF123_0",
+        "parameterId": "depth",
+        "expression": "60 mm",
+        "text": "Extrude depth is 60 mm"
+      },
+      {
+        "id": "fillet",
+        "kind": "parameterEquals",
+        "featureId": "FfedCBA321_1",
+        "parameterId": "radius",
+        "expression": "2 mm",
+        "text": "Edge fillet radius is 2 mm"
+      },
+      {
+        "id": "fillet-ok",
+        "kind": "featureState",
+        "featureId": "FfedCBA321_1",
+        "state": "OK",
+        "text": "Fillet regenerates without error"
+      }
+    ],
+    "preservationConditions": [
+      {
+        "id": "holes",
+        "kind": "featureUnchanged",
+        "featureId": "FholeAAA111_2",
+        "text": "Mounting holes unchanged"
+      },
+      {
+        "id": "look",
+        "kind": "note",
+        "text": "Overall appearance stays compact"
+      }
+    ],
+    "target": {
+      "documentId": "0123456789abcdef01234567",
+      "elementId": "fedcba9876543210fedcba98",
+      "primaryWorkspaceId": "eeeeeeeeeeeeeeeeeeeeeeee",
+      "baseMicroversion": "aaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "candidate": {
+      "mode": "create",
+      "workspaceId": null
+    },
+    "operations": [
+      "updatePartStudioFeature"
+    ],
+    "featureIds": [
+      "FabcDEF123_0",
+      "FfedCBA321_1"
+    ],
+    "maxDispatches": 10,
+    "lifetimeMs": 7200000,
+    "requester": {
+      "channel": "discord",
+      "senderId": "requester-fixture"
+    },
+    "origin": {
+      "channel": "discord",
+      "target": "channel:origin-fixture"
+    }
+  },
+  "canonical": "{\"candidate\":{\"mode\":\"create\",\"workspaceId\":null},\"featureIds\":[\"FabcDEF123_0\",\"FfedCBA321_1\"],\"goalConditions\":[{\"expression\":\"60 mm\",\"featureId\":\"FabcDEF123_0\",\"id\":\"depth\",\"kind\":\"parameterEquals\",\"parameterId\":\"depth\",\"text\":\"Extrude depth is 60 mm\"},{\"expression\":\"2 mm\",\"featureId\":\"FfedCBA321_1\",\"id\":\"fillet\",\"kind\":\"parameterEquals\",\"parameterId\":\"radius\",\"text\":\"Edge fillet radius is 2 mm\"},{\"featureId\":\"FfedCBA321_1\",\"id\":\"fillet-ok\",\"kind\":\"featureState\",\"state\":\"OK\",\"text\":\"Fillet regenerates without error\"}],\"goalText\":\"Stiffen the camera mount: 60 mm extrude depth and 2 mm edge fillet, keep the mounting holes.\",\"lifetimeMs\":7200000,\"maxDispatches\":10,\"operations\":[\"updatePartStudioFeature\"],\"origin\":{\"channel\":\"discord\",\"target\":\"channel:origin-fixture\"},\"preservationConditions\":[{\"featureId\":\"FholeAAA111_2\",\"id\":\"holes\",\"kind\":\"featureUnchanged\",\"text\":\"Mounting holes unchanged\"},{\"id\":\"look\",\"kind\":\"note\",\"text\":\"Overall appearance stays compact\"}],\"requester\":{\"channel\":\"discord\",\"senderId\":\"requester-fixture\"},\"target\":{\"baseMicroversion\":\"aaaaaaaaaaaaaaaaaaaaaaaa\",\"documentId\":\"0123456789abcdef01234567\",\"elementId\":\"fedcba9876543210fedcba98\",\"primaryWorkspaceId\":\"eeeeeeeeeeeeeeeeeeeeeeee\"},\"version\":1}",
+  "goalHash": "b91a5175f12d45f53812373afeafca243c96a2a4430920e4e280667955f1c1a7"
+}

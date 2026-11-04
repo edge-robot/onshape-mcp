@@ -1488,3 +1488,84 @@ fn tools_call_read_resource_unknown_uri_returns_error() {
 
     client.shutdown();
 }
+
+#[test]
+fn external_token_catalog_exposes_complete_schemas_and_no_oauth_tools() {
+    let env = HashMap::from([
+        (
+            "ONSHAPE_MCP_EXTERNAL_TOKEN__FILE",
+            "/nonexistent/token.json",
+        ),
+        (
+            "ONSHAPE_MCP_EXTERNAL_TOKEN__DOCUMENT_ID",
+            "aaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+        (
+            "ONSHAPE_MCP_EXTERNAL_TOKEN__WORKSPACE_ID",
+            "bbbbbbbbbbbbbbbbbbbbbbbb",
+        ),
+        (
+            "ONSHAPE_MCP_EXTERNAL_TOKEN__ELEMENT_ID",
+            "cccccccccccccccccccccccc",
+        ),
+    ]);
+    let mut client = McpTestClient::spawn_with_env(&env);
+    client.initialize();
+    let response = client.send_request("tools/list", &serde_json::json!({}));
+    assert!(response["error"].is_null(), "{response}");
+    let tools = response["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 5);
+    for tool in tools {
+        assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
+        assert!(tool["inputSchema"]["properties"].is_object(), "{tool}");
+        assert_ne!(tool["name"], "onshape_auth_login");
+    }
+    let call = tools
+        .iter()
+        .find(|tool| tool["name"] == "onshape_api_call")
+        .unwrap();
+    for field in [
+        "endpoint",
+        "path_params",
+        "query_params",
+        "header_params",
+        "body",
+        "file_refs",
+    ] {
+        assert!(
+            call["inputSchema"]["properties"].get(field).is_some(),
+            "missing {field}"
+        );
+    }
+    for (name, arguments) in [
+        (
+            "onshape_api_explain",
+            serde_json::json!({"endpoint":"updatePartStudioFeature"}),
+        ),
+        (
+            "onshape_api_schema",
+            serde_json::json!({"schema":"BTFeatureDefinitionCall-1406"}),
+        ),
+    ] {
+        let result = client.send_request(
+            "tools/call",
+            &serde_json::json!({"name":name,"arguments":arguments}),
+        );
+        assert!(result["error"].is_null(), "{result}");
+        assert_ne!(result["result"]["isError"], true, "{result}");
+        assert!(
+            result["result"]["content"]
+                .as_array()
+                .unwrap()
+                .first()
+                .unwrap()["text"]
+                .is_string()
+        );
+    }
+    let denied = client.send_request(
+        "tools/call",
+        &serde_json::json!({"name":"onshape_auth_login","arguments":{}}),
+    );
+    assert_eq!(denied["error"]["message"], "external_token_tool_denied");
+    client.shutdown();
+}

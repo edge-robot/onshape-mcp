@@ -1,0 +1,22 @@
+{
+  "method": "POST",
+  "path": "/partstudios/d/0123456789abcdef01234567/w/89abcdef0123456789abcdef/e/fedcba9876543210fedcba98/features/featureid/FabcDEF123_0",
+  "query_params": [],
+  "body": {
+    "feature": {
+      "featureId": "FabcDEF123_0",
+      "featureType": "extrude",
+      "suppressed": false,
+      "parameters": [
+        {
+          "parameterId": "depth",
+          "expression": "60 mm"
+        }
+      ]
+    },
+    "sourceMicroversion": "aaaaaaaaaaaaaaaaaaaaaaaa",
+    "rejectMicroversionSkew": true,
+    "serializationVersion": "1.2.3",
+    "libraryVersion": 2000
+  }
+}

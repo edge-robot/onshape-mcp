@@ -1,5 +1,9 @@
 # Requirements
 
+> Supplementary development and toolchain reference. [Root spec.md](../../../spec.md) is the sole normative
+> product requirements source, including platform and standalone obligations.
+> This reference cannot redefine product scope or establish current runtime availability.
+
 ## Platform Support
 
 | Platform | Architecture | Status |

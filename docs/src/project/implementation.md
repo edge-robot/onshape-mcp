@@ -1,5 +1,9 @@
 # Implementation
 
+> Historical implementation checklist and development roadmap. [Root spec.md](../../../spec.md) is the sole normative
+> product requirements source, including platform and standalone obligations.
+> This reference cannot redefine product scope or establish current runtime availability.
+
 ## Phase 1: Project Setup
 
 - [x] Initialize Cargo workspace

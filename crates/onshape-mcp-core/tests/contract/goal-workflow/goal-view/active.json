@@ -1,0 +1,88 @@
+{
+  "goalId": "3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b",
+  "scopeRevision": 1,
+  "state": "ACTIVE",
+  "goalText": "Stiffen the camera mount: 60 mm extrude depth and 2 mm edge fillet, keep the mounting holes.",
+  "goalConditions": [
+    {
+      "id": "depth",
+      "kind": "parameterEquals",
+      "featureId": "FabcDEF123_0",
+      "parameterId": "depth",
+      "expression": "60 mm",
+      "text": "Extrude depth is 60 mm"
+    },
+    {
+      "id": "fillet",
+      "kind": "parameterEquals",
+      "featureId": "FfedCBA321_1",
+      "parameterId": "radius",
+      "expression": "2 mm",
+      "text": "Edge fillet radius is 2 mm"
+    },
+    {
+      "id": "fillet-ok",
+      "kind": "featureState",
+      "featureId": "FfedCBA321_1",
+      "state": "OK",
+      "text": "Fillet regenerates without error"
+    }
+  ],
+  "preservationConditions": [
+    {
+      "id": "holes",
+      "kind": "featureUnchanged",
+      "featureId": "FholeAAA111_2",
+      "text": "Mounting holes unchanged"
+    },
+    {
+      "id": "look",
+      "kind": "note",
+      "text": "Overall appearance stays compact"
+    }
+  ],
+  "goalHash": "b91a5175f12d45f53812373afeafca243c96a2a4430920e4e280667955f1c1a7",
+  "confirmationRequired": false,
+  "target": {
+    "documentId": "0123456789abcdef01234567",
+    "elementId": "fedcba9876543210fedcba98",
+    "primaryWorkspaceId": "eeeeeeeeeeeeeeeeeeeeeeee",
+    "candidateWorkspaceId": "89abcdef0123456789abcdef",
+    "baseMicroversion": "aaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "scope": {
+    "featureIds": [
+      "FabcDEF123_0",
+      "FfedCBA321_1"
+    ],
+    "operations": [
+      "updatePartStudioFeature"
+    ],
+    "maxDispatches": 10,
+    "lifetimeMs": 7200000
+  },
+  "progress": {
+    "dispatches": 2,
+    "remaining": 8,
+    "unreconciledSequence": null,
+    "unreconciledEntry": null,
+    "lastOutcome": "OK",
+    "lastVerification": null
+  },
+  "grant": {
+    "revision": 1,
+    "state": "ACTIVE",
+    "expiresAt": 4102451700000
+  },
+  "confirmation": {
+    "expiresAt": 4102446300000,
+    "confirmedAt": 4102444500000,
+    "confirmedBy": {
+      "kind": "dashboard-operator"
+    },
+    "nonce": null
+  },
+  "result": null,
+  "capability": "AVAILABLE",
+  "observedAt": 4102445000000
+}

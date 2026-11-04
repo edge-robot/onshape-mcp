@@ -6,6 +6,8 @@
 
 pub use openapi_mcp_io::api;
 pub mod config;
+mod dispatch_journal;
+mod external_token;
 pub mod login;
 pub mod oauth;
 pub mod oauth_server;
@@ -78,6 +80,15 @@ pub(crate) const REFRESH_MARGIN_SECS: i64 = 60;
 /// `OAuth` — Bearer token auth with refresh capability.
 /// `OAuthPending` — client creds present but awaiting tokens from auth flow.
 pub(crate) enum ApiState {
+    /// External-token mode: config, request timeout, the per-process
+    /// replay record of admitted approvals (contract §2.5 step 8), and the
+    /// dispatch target (always the fixed Onshape origin outside tests).
+    ExternalToken(
+        Box<onshape_mcp_core::config::ExternalTokenConfig>,
+        Duration,
+        onshape_mcp_core::approval::ConsumedProposals,
+        external_token::Provider,
+    ),
     /// Credentials are not configured or are incomplete.
     NotConfigured {
         /// What auth method was attempted.
@@ -272,6 +283,7 @@ impl ApiState {
                 configured_method: *configured_method,
                 detail: detail.clone(),
             },
+            Self::ExternalToken(config, ..) => external_token::resolved_auth(config),
             Self::Basic(_) => ResolvedAuth::Basic,
             Self::OAuth(oauth) => ResolvedAuth::OAuthReady {
                 expires_at: oauth.session.tokens.expires_at,
@@ -474,8 +486,12 @@ impl ServerHandler for OnshapeMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
-        // Core returns Vec<Tool> directly - no conversion needed
-        std::future::ready(Ok(ListToolsResult::with_all_items(tools::list_tools())
+        let catalog = if self.config.external_token.is_some() {
+            tools::list_tools_external_token()
+        } else {
+            tools::list_tools()
+        };
+        std::future::ready(Ok(ListToolsResult::with_all_items(catalog)
             .with_ttl_ms(STATIC_MCP_CACHE_TTL_MS)
             .with_cache_scope(CacheScope::Public)))
     }
@@ -549,6 +565,12 @@ impl OnshapeMcpServer {
         &self,
         request: CallToolRequestParams,
     ) -> Result<CallToolResult, McpError> {
+        if self.config.external_token.is_some() && !tools::is_external_token_tool(&request.name) {
+            return Err(McpError::invalid_request(
+                "external_token_tool_denied",
+                None,
+            ));
+        }
         // Lock state to derive resolved auth and potentially execute API requests.
         let mut state = self.api_state.lock().await;
         let validation_state = self.validation.shared().ok_or_else(|| {
@@ -577,8 +599,8 @@ impl OnshapeMcpServer {
             &mut state,
             &validation_state,
             Some(&self.login_state),
-            true, // stdio: file writes allowed
-            true, // stdio: file reads allowed
+            self.config.external_token.is_none(), // external-token: no filesystem tools
+            self.config.external_token.is_none(),
         )
         .await
     }
@@ -891,6 +913,9 @@ async fn execute_raw_api_request(
     match state {
         ApiState::NotConfigured { .. } | ApiState::OAuthPending(_) => {
             unreachable!("caller must check state before calling execute_raw_api_request")
+        }
+        ApiState::ExternalToken(config, timeout, consumed, provider) => {
+            external_token::execute(config, *timeout, consumed, provider, api_req).await
         }
         ApiState::Basic(client) => execute_basic_raw(client, api_req).await,
         // OAuth needs &mut ApiState for the potential state transition,
@@ -1591,6 +1616,15 @@ fn build_api_state(
     config: &AppConfig,
     server_url: &str,
 ) -> Result<ApiState, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(external) = &config.external_token {
+        external_token::validate_config(external)?;
+        return Ok(ApiState::ExternalToken(
+            Box::new(external.clone()),
+            config.api.timeout,
+            onshape_mcp_core::approval::ConsumedProposals::default(),
+            external_token::Provider::Onshape,
+        ));
+    }
     if let Some(proxy_url) = config.auth.proxy_url.as_deref() {
         onshape_mcp_core::validate_proxy_url(proxy_url)
             .map_err(|message| format!("invalid configured auth.proxy_url: {message}"))?;
@@ -1806,7 +1840,7 @@ pub async fn run(
             ApiState::OAuthPending(pending) => Some(pending.token_path.clone()),
             ApiState::OAuth(oauth) => Some(oauth.token_path.clone()),
             ApiState::NotConfigured { .. } => default_token_file_path(),
-            ApiState::Basic(_) | ApiState::HttpOAuth(_) => None,
+            ApiState::ExternalToken(..) | ApiState::Basic(_) | ApiState::HttpOAuth(_) => None,
         }
     };
     let watcher_ctx = token_path.map(|token_path| {
@@ -1868,6 +1902,93 @@ fn streamable_http_server_config(
     )
 }
 
+/// Upper bound for draining in-flight requests after a shutdown signal.
+///
+/// Together with the binary's 1 s runtime shutdown bound this keeps a stop
+/// below 5 s. Requests still running afterwards are cancelled, never retried.
+const SHUTDOWN_DRAIN: Duration = Duration::from_secs(3);
+
+/// Resolve on the first SIGTERM or SIGINT (Ctrl+C).
+///
+/// A signal whose handler cannot be installed never resolves, so a failed
+/// installation does not stop the server.
+async fn shutdown_signal() {
+    let interrupt = async {
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = interrupt => {}
+        () = terminate => {}
+    }
+}
+
+/// Serve `app` until SIGTERM or SIGINT, then shut down gracefully.
+///
+/// See [`serve_with_shutdown`]; the drain bound is [`SHUTDOWN_DRAIN`].
+async fn serve_until_shutdown(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+    cancellation_token: tokio_util::sync::CancellationToken,
+) -> std::io::Result<()> {
+    serve_with_shutdown(
+        listener,
+        app,
+        cancellation_token,
+        shutdown_signal(),
+        SHUTDOWN_DRAIN,
+    )
+    .await
+}
+
+/// Serve `app` until `signal` resolves, then drain for at most `drain`.
+///
+/// On the signal, `cancellation_token` is cancelled (ending MCP sessions and
+/// streams), the listener stops accepting, and in-flight requests get `drain`
+/// to finish. After that this returns `Ok(())` without waiting further; the
+/// remaining connection tasks are dropped when the caller's runtime shuts down.
+async fn serve_with_shutdown(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+    cancellation_token: tokio_util::sync::CancellationToken,
+    signal: impl std::future::Future<Output = ()> + Send + 'static,
+    drain: Duration,
+) -> std::io::Result<()> {
+    use std::future::IntoFuture as _;
+
+    let signalled = tokio_util::sync::CancellationToken::new();
+    let trigger = signalled.clone();
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            signal.await;
+            cancellation_token.cancel();
+            trigger.cancel();
+        })
+        .into_future();
+    tokio::select! {
+        result = server => result,
+        () = async {
+            signalled.cancelled().await;
+            tokio::time::sleep(drain).await;
+        } => {
+            eprintln!("Shutdown drain deadline reached; cancelling in-flight requests");
+            Ok(())
+        }
+    }
+}
+
 /// Runs the MCP server over Streamable HTTP transport.
 ///
 /// Serves both the OAuth endpoints (metadata, DCR, authorize, callback, token)
@@ -1896,6 +2017,10 @@ pub async fn run_http(
         StreamableHttpService, session::local::LocalSessionManager,
     };
     use tokio_util::sync::CancellationToken;
+
+    if config.external_token.is_some() {
+        return external_token::run_http(name, version, config).await;
+    }
 
     // Validate required config.
     let public_url = config
@@ -2040,14 +2165,7 @@ pub async fn run_http(
     eprintln!("Public URL: {public_url}");
     eprintln!("MCP endpoint: {mcp_endpoint}");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            // Ignore errors from ctrl_c — if we can't install the handler,
-            // we simply won't have graceful shutdown on Ctrl+C.
-            let _ = tokio::signal::ctrl_c().await;
-            cancellation_token.cancel();
-        })
-        .await?;
+    serve_until_shutdown(listener, app, cancellation_token).await?;
 
     Ok(())
 }
@@ -3354,5 +3472,181 @@ mod tests {
             std::fs::read(&file_path).expect("should read file"),
             b"png-bytes"
         );
+    }
+
+    // --- G12: onshape_auth_status validate=true in external-token mode ---
+
+    /// Pins the current behaviour for contract gap G12: `validate: true` builds
+    /// `GET /users/sessioninfo`, which is outside the external-token read set
+    /// (contract §2.4). It is denied with `external_token_read_policy_denied`
+    /// before the credential file is loaded and before any client is built, so
+    /// no provider I/O happens. The token file deliberately does not exist: if
+    /// the policy check ever moved after credential loading, this test would see
+    /// `external_token_unavailable` instead (still without network access).
+    #[tokio::test]
+    async fn external_token_auth_status_validate_is_read_policy_denied_before_io() {
+        let dir = tempfile::tempdir().expect("should create temp dir");
+        let config = onshape_mcp_core::config::ExternalTokenConfig {
+            file: dir.path().join("missing-token.json"),
+            document_id: "a".repeat(24),
+            workspace_id: "b".repeat(24),
+            element_id: "c".repeat(24),
+            mutation: None,
+            mutation_approval_file: None,
+            goal_grant_file: None,
+            dispatch_journal_dir: None,
+            read_api_version: None,
+        };
+        let mut state = ApiState::ExternalToken(
+            Box::new(config),
+            Duration::from_secs(1),
+            onshape_mcp_core::approval::ConsumedProposals::default(),
+            external_token::Provider::Onshape,
+        );
+        let initial_validation = ValidationState::default();
+        let validation = tokio::sync::Mutex::new(initial_validation.clone());
+        let spec = embedded_openapi_spec();
+        let arguments = serde_json::json!({"validate": true});
+
+        let effect = tools::call_tool(
+            "onshape_auth_status",
+            arguments.as_object(),
+            &state.resolved_auth(),
+            &initial_validation,
+            Some(&spec),
+        );
+        match &effect {
+            tools::ToolEffect::ApiRequest { request, .. } => {
+                assert_eq!(request.method, http::Method::GET);
+                assert_eq!(request.path, "/users/sessioninfo");
+            }
+            other => panic!("expected sessioninfo ApiRequest, got {other:?}"),
+        }
+
+        let error = dispatch_tool_effect(effect, &mut state, &validation, None, false, false)
+            .await
+            .expect_err("validate=true must be denied in external-token mode");
+
+        assert_eq!(error.code, ErrorCode::INVALID_REQUEST);
+        assert_eq!(error.message, "external_token_read_policy_denied");
+        assert!(error.data.is_none());
+        assert_eq!(*validation.lock().await, initial_validation);
+        assert!(matches!(state, ApiState::ExternalToken(..)));
+    }
+
+    /// Start `serve_with_shutdown` with a `/work` route that signals entry and
+    /// then waits `work` (forever if `None`) before answering 200.
+    async fn shutdown_fixture(
+        work: Option<Duration>,
+        drain: Duration,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::sync::oneshot::Sender<()>,
+        Arc<tokio::sync::Notify>,
+        tokio_util::sync::CancellationToken,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+    ) {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let entered_in_handler = Arc::clone(&entered);
+        let app = axum::Router::new().route(
+            "/work",
+            axum::routing::get(move || {
+                let entered = Arc::clone(&entered_in_handler);
+                async move {
+                    entered.notify_one();
+                    match work {
+                        Some(duration) => tokio::time::sleep(duration).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                    axum::http::StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("should bind");
+        let address = listener.local_addr().expect("should have local address");
+        let (signal_tx, signal_rx) = tokio::sync::oneshot::channel::<()>();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let server = tokio::spawn(serve_with_shutdown(
+            listener,
+            app,
+            cancel.clone(),
+            async move {
+                let _ = signal_rx.await;
+            },
+            drain,
+        ));
+        (address, signal_tx, entered, cancel, server)
+    }
+
+    async fn get_work(address: std::net::SocketAddr) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let mut stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("should connect");
+        stream
+            .write_all(b"GET /work HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("should write request");
+        let mut response = String::new();
+        let _ = stream.read_to_string(&mut response).await;
+        response
+    }
+
+    #[tokio::test]
+    async fn shutdown_lets_in_flight_request_finish_within_drain() {
+        let (address, signal, entered, cancel, server) =
+            shutdown_fixture(Some(Duration::from_millis(300)), Duration::from_secs(5)).await;
+        let client = tokio::spawn(get_work(address));
+        entered.notified().await;
+        signal.send(()).expect("server should await the signal");
+
+        let response = client.await.expect("client task should finish");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let result = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("server should stop after draining")
+            .expect("server task should not panic");
+        assert!(result.is_ok(), "{result:?}");
+        assert!(cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_stuck_request_after_drain_deadline() {
+        let drain = Duration::from_millis(200);
+        let (address, signal, entered, cancel, server) = shutdown_fixture(None, drain).await;
+        let client = tokio::spawn(get_work(address));
+        entered.notified().await;
+        let started = std::time::Instant::now();
+        signal.send(()).expect("server should await the signal");
+
+        let result = tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .expect("server should stop at the drain deadline")
+            .expect("server task should not panic");
+        let elapsed = started.elapsed();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(elapsed >= drain, "{elapsed:?}");
+        assert!(cancel.is_cancelled());
+        // axum spawns connection tasks, so the stuck one ends only with the
+        // runtime (the binary bounds that with `shutdown_timeout`).
+        client.abort();
+    }
+
+    #[tokio::test]
+    async fn serve_runs_until_signal() {
+        let (address, signal, _entered, cancel, server) =
+            shutdown_fixture(Some(Duration::ZERO), Duration::from_secs(1)).await;
+        assert!(get_work(address).await.starts_with("HTTP/1.1 200"));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!server.is_finished());
+        assert!(!cancel.is_cancelled());
+        drop(signal);
+        let result = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("server should stop")
+            .expect("server task should not panic");
+        assert!(result.is_ok(), "{result:?}");
     }
 }

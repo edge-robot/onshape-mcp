@@ -6,6 +6,8 @@
 
 # Core Design
 
+- [Project Overview](project/overview.md)
+
 - [Principles](project/principles.md)
 - [Architecture](project/architecture.md)
 - [Data Flow](project/data-flow.md)

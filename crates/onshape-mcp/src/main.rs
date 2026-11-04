@@ -7,6 +7,8 @@
 
 use clap::{Parser, Subcommand};
 
+mod healthcheck;
+
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -83,6 +85,13 @@ enum Command {
         #[arg(long)]
         allowed_users: Option<String>,
     },
+    /// Probe a local `/health` endpoint; exits 0 on HTTP 200.
+    ///
+    /// For container healthchecks in images without a shell or curl. Exits 1
+    /// on any other status, a connection error or a timeout, and 2 on invalid
+    /// arguments. Only loopback `http://` URLs are accepted. Reads no config,
+    /// token or approval file and prints nothing on success.
+    Healthcheck(healthcheck::HealthcheckArgs),
 }
 
 /// Authentication subcommands.
@@ -103,11 +112,26 @@ fn parse_nonblank_proxy_url(value: &str) -> Result<String, String> {
     onshape_mcp_core::validate_proxy_url(value)
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
 
+    // The probe is synchronous: no async runtime, no config, no background work.
+    if let Some(Command::Healthcheck(ref args)) = cli.command {
+        std::process::exit(healthcheck::run(args));
+    }
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(async_main(cli));
+    // Bound the wait for leftover blocking tasks so shutdown stays prompt.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    result
+}
+
+async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match cli.command {
+        Some(Command::Healthcheck(_)) => Ok(()),
         Some(Command::Auth { ref action }) => handle_auth_command(action, &cli).await,
         Some(Command::Http {
             ref host,
@@ -219,6 +243,13 @@ async fn handle_auth_login(
     cli: &Cli,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use onshape_mcp_core::tools::LoginMode;
+    let config = onshape_mcp_io::config::load_config_with_overrides(
+        cli.config.as_deref(),
+        build_cli_overrides(cli),
+    )?;
+    if config.external_token.is_some() {
+        return Err("external_token_auth_owned_externally".into());
+    }
 
     // Supplying a proxy URL explicitly selects self-hosted proxy mode.
     let mode = if let Some(proxy_url) = proxy_url {

@@ -1,0 +1,7 @@
+{
+  "accessToken": "access-fixture-not-a-real-token",
+  "expiresAt": 1,
+  "scopes": [
+    "OAuth2Read"
+  ]
+}
